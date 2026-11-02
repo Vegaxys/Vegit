@@ -1,0 +1,653 @@
+//! Thin layer over the `git` command line.
+//!
+//! The app shells out to the user's own `git` instead of linking a git library so that
+//! credentials, hooks, config and SSH keys behave exactly as they do in a terminal.
+
+use std::collections::HashMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+/// How many commits the graph loads; enough for daily work while keeping refreshes fast.
+pub const MAX_COMMITS: usize = 3000;
+
+#[derive(Clone, Debug)]
+pub struct Commit {
+    pub sha: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    pub email: String,
+    pub time: i64,
+    pub summary: String,
+    /// First line of the description, shown after the summary in a quieter colour.
+    pub body: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RefKind {
+    Local,
+    Remote,
+    Tag,
+}
+
+#[derive(Clone, Debug)]
+pub struct RefInfo {
+    /// Short display name, e.g. `main`, `origin/main`, `v1.0`.
+    pub name: String,
+    pub kind: RefKind,
+    pub target: String,
+    /// Upstream short name for local branches (`origin/main`).
+    pub upstream: Option<String>,
+    /// Commits ahead/behind upstream for local branches.
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct Stash {
+    /// `stash@{0}` style reference used by `git stash apply/pop/drop`.
+    pub reference: String,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileState {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Untracked,
+    Conflicted,
+    TypeChange,
+}
+
+impl FileState {
+    fn from_code(c: char) -> Self {
+        match c {
+            'A' => Self::Added,
+            'D' => Self::Deleted,
+            'R' | 'C' => Self::Renamed,
+            '?' => Self::Untracked,
+            'U' => Self::Conflicted,
+            'T' => Self::TypeChange,
+            _ => Self::Modified,
+        }
+    }
+
+    pub fn letter(self) -> &'static str {
+        match self {
+            Self::Added => "A",
+            Self::Modified => "M",
+            Self::Deleted => "D",
+            Self::Renamed => "R",
+            Self::Untracked => "N",
+            Self::Conflicted => "!",
+            Self::TypeChange => "T",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct FileChange {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub state: FileState,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct WorkStatus {
+    pub staged: Vec<FileChange>,
+    pub unstaged: Vec<FileChange>,
+}
+
+impl WorkStatus {
+    pub fn is_clean(&self) -> bool {
+        self.staged.is_empty() && self.unstaged.is_empty()
+    }
+}
+
+/// An operation in progress that the user must finish or abort.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingOp {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+impl PendingOp {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Rebase => "rebase",
+            Self::CherryPick => "cherry-pick",
+            Self::Revert => "revert",
+        }
+    }
+
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Rebase => "rebase",
+            Self::CherryPick => "cherry-pick",
+            Self::Revert => "revert",
+        }
+    }
+}
+
+/// Everything the window shows about one repository, loaded in one go.
+#[derive(Clone, Debug, Default)]
+pub struct Snapshot {
+    pub commits: Vec<Commit>,
+    pub refs: Vec<RefInfo>,
+    pub stashes: Vec<Stash>,
+    pub head_sha: Option<String>,
+    /// Current branch, `None` when HEAD is detached or the repo has no commit yet.
+    pub head_branch: Option<String>,
+    pub status: WorkStatus,
+    pub pending: Option<PendingOp>,
+    pub remotes: Vec<String>,
+    /// Submodule folders, relative to the repository root.
+    pub submodules: Vec<String>,
+}
+
+impl Snapshot {
+    /// Refs grouped by the commit they point at, for the labels in the graph.
+    pub fn refs_by_sha(&self) -> HashMap<String, Vec<usize>> {
+        let mut map: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, r) in self.refs.iter().enumerate() {
+            map.entry(r.target.clone()).or_default().push(i);
+        }
+        map
+    }
+
+    pub fn current_ref(&self) -> Option<&RefInfo> {
+        let name = self.head_branch.as_ref()?;
+        self.refs.iter().find(|r| r.kind == RefKind::Local && &r.name == name)
+    }
+}
+
+#[derive(Debug)]
+pub struct GitError(pub String);
+
+impl std::fmt::Display for GitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+pub type GitResult<T> = Result<T, GitError>;
+
+fn base_command(dir: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(dir);
+    // Never block on a terminal prompt the user can't see; credential helpers with
+    // their own window (Git Credential Manager) still work.
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_EDITOR", "true");
+    cmd.env("LC_ALL", "C");
+    // Background status polls must never grab index.lock and make a stage/commit fail.
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+/// Runs git and returns stdout; a non-zero exit becomes an error holding stderr.
+pub fn run(dir: &Path, args: &[&str]) -> GitResult<String> {
+    let out = base_command(dir)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| GitError(format!("Could not start git ({e}). Is git installed and on PATH?")))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        let mut msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if msg.is_empty() {
+            msg = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        }
+        if msg.is_empty() {
+            msg = format!("git {} failed", args.first().unwrap_or(&""));
+        }
+        Err(GitError(msg))
+    }
+}
+
+/// Biggest diff kept in memory. Unity scenes and prefabs can produce hundreds of
+/// megabytes of YAML diff; past this point the rest is dropped and the view says so.
+pub const MAX_DIFF_BYTES: usize = 24 * 1024 * 1024;
+
+/// Like [`run`] but ignores the exit code (git exits 1 on success for `diff --no-index`)
+/// and stops reading after [`MAX_DIFF_BYTES`]. Returns the text and whether it was cut.
+fn run_lenient(dir: &Path, args: &[&str]) -> (String, bool) {
+    use std::io::Read;
+    let Ok(mut child) = base_command(dir)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return (String::new(), false);
+    };
+    let mut buf = Vec::new();
+    let mut truncated = false;
+    if let Some(out) = child.stdout.take() {
+        let _ = out.take(MAX_DIFF_BYTES as u64 + 1).read_to_end(&mut buf);
+        if buf.len() > MAX_DIFF_BYTES {
+            truncated = true;
+            buf.truncate(MAX_DIFF_BYTES);
+            // Cut at the last full line so the parser never sees half a line.
+            if let Some(nl) = buf.iter().rposition(|&b| b == b'\n') {
+                buf.truncate(nl + 1);
+            }
+            let _ = child.kill();
+        }
+    }
+    let _ = child.wait();
+    (String::from_utf8_lossy(&buf).into_owned(), truncated)
+}
+
+/// Raw bytes of a successful git command (file contents for image previews).
+pub fn run_bytes(dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    let out = base_command(dir).args(args).stdin(Stdio::null()).output().ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
+/// Runs git with `input` piped to stdin (used to apply single hunks).
+pub fn run_with_input(dir: &Path, args: &[&str], input: &str) -> GitResult<String> {
+    let mut child = base_command(dir)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| GitError(format!("Could not start git ({e})")))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(input.as_bytes())
+            .map_err(|e| GitError(e.to_string()))?;
+    }
+    let out = child.wait_with_output().map_err(|e| GitError(e.to_string()))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(GitError(String::from_utf8_lossy(&out.stderr).trim().to_string()))
+    }
+}
+
+/// Returns the top folder of the repository containing `path`.
+pub fn repo_root(path: &Path) -> GitResult<PathBuf> {
+    let out = run(path, &["rev-parse", "--show-toplevel"])?;
+    Ok(PathBuf::from(out.trim()))
+}
+
+pub fn load_snapshot(dir: &Path) -> GitResult<Snapshot> {
+    let mut snap = Snapshot::default();
+    let git_dir = PathBuf::from(run(dir, &["rev-parse", "--absolute-git-dir"])?.trim());
+
+    snap.head_sha = run(dir, &["rev-parse", "-q", "--verify", "HEAD"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    snap.head_branch = run(dir, &["symbolic-ref", "--short", "-q", "HEAD"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    snap.refs = load_refs(dir)?;
+    snap.stashes = load_stashes(dir);
+    snap.status = load_status(dir)?;
+    snap.remotes = run(dir, &["remote"])
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    if snap.head_sha.is_some() {
+        snap.commits = load_commits(dir)?;
+    }
+    // Read .gitmodules directly: `git submodule status` can be slow on big projects.
+    if dir.join(".gitmodules").exists() {
+        snap.submodules = run(dir, &["config", "--file", ".gitmodules", "--get-regexp", r"\.path$"])
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.split_once(' ').map(|(_, p)| p.trim().to_string()))
+            .collect();
+    }
+
+    snap.pending = if git_dir.join("MERGE_HEAD").exists() {
+        Some(PendingOp::Merge)
+    } else if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+        Some(PendingOp::Rebase)
+    } else if git_dir.join("CHERRY_PICK_HEAD").exists() {
+        Some(PendingOp::CherryPick)
+    } else if git_dir.join("REVERT_HEAD").exists() {
+        Some(PendingOp::Revert)
+    } else {
+        None
+    };
+    Ok(snap)
+}
+
+fn load_commits(dir: &Path) -> GitResult<Vec<Commit>> {
+    let limit = format!("-n{MAX_COMMITS}");
+    // Branches, remotes, tags and HEAD, but not refs/stash: stashes live in the sidebar.
+    let out = run(
+        dir,
+        &[
+            "log",
+            "--branches",
+            "--remotes",
+            "--tags",
+            "HEAD",
+            "--date-order",
+            &limit,
+            "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%b%x1e",
+        ],
+    )?;
+    let mut commits = Vec::new();
+    for rec in out.split('\x1e') {
+        let rec = rec.trim_start_matches(['\n', '\r']);
+        if rec.is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = rec.split('\x1f').collect();
+        if f.len() < 6 {
+            continue;
+        }
+        commits.push(Commit {
+            sha: f[0].to_string(),
+            parents: f[1].split_whitespace().map(str::to_string).collect(),
+            author: f[2].to_string(),
+            email: f[3].to_string(),
+            time: f[4].trim().parse().unwrap_or(0),
+            summary: f[5].trim_end().to_string(),
+            body: f.get(6).map(|b| first_line(b)).unwrap_or_default(),
+        });
+    }
+    Ok(commits)
+}
+
+fn first_line(text: &str) -> String {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
+    line.chars().take(140).collect()
+}
+
+/// One commit of a file's history, with the file's path at that commit (it can be renamed).
+#[derive(Clone, Debug)]
+pub struct HistoryEntry {
+    pub commit: Commit,
+    pub path: String,
+}
+
+/// Commits that changed `path`, newest first, following renames.
+pub fn file_log(dir: &Path, path: &str) -> GitResult<Vec<HistoryEntry>> {
+    let limit = format!("-n{MAX_COMMITS}");
+    let out = run(dir, &["log", &limit, "--follow", "--name-only", "--format=%x1e%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s", "--", path])?;
+    let mut entries = Vec::new();
+    for rec in out.split('\x1e').filter(|r| !r.trim().is_empty()) {
+        let mut lines = rec.lines();
+        let head = lines.next().unwrap_or_default();
+        let f: Vec<&str> = head.split('\x1f').collect();
+        if f.len() < 6 {
+            continue;
+        }
+        let file = lines.map(str::trim).filter(|l| !l.is_empty()).last().unwrap_or(path).to_string();
+        entries.push(HistoryEntry {
+            commit: Commit {
+                sha: f[0].to_string(),
+                parents: f[1].split_whitespace().map(str::to_string).collect(),
+                author: f[2].to_string(),
+                email: f[3].to_string(),
+                time: f[4].trim().parse().unwrap_or(0),
+                summary: f[5].trim_end().to_string(),
+                body: String::new(),
+            },
+            path: file,
+        });
+    }
+    Ok(entries)
+}
+
+/// One line of `git blame`.
+#[derive(Clone, Debug)]
+pub struct BlameLine {
+    pub sha: String,
+    pub author: String,
+    pub time: i64,
+    pub summary: String,
+    pub text: String,
+    /// First line of a run of lines from the same commit: only it shows the commit.
+    pub starts_block: bool,
+    /// Index of that run, used to shade every other run.
+    pub block: usize,
+}
+
+/// Who last changed each line of `path` (in the working folder version).
+pub fn blame(dir: &Path, path: &str) -> GitResult<Vec<BlameLine>> {
+    let out = run(dir, &["blame", "--line-porcelain", "--", path])?;
+    let mut lines = Vec::new();
+    let (mut sha, mut author, mut time, mut summary) = (String::new(), String::new(), 0i64, String::new());
+    let mut prev_sha = String::new();
+    let mut block = 0usize;
+    for l in out.lines() {
+        if let Some(text) = l.strip_prefix('\t') {
+            let starts_block = sha != prev_sha;
+            if starts_block {
+                block += 1;
+            }
+            prev_sha = sha.clone();
+            lines.push(BlameLine {
+                sha: sha.clone(),
+                author: author.clone(),
+                time,
+                summary: summary.clone(),
+                text: text.replace('\t', "    "),
+                starts_block,
+                block,
+            });
+        } else if let Some(a) = l.strip_prefix("author ") {
+            author = a.to_string();
+        } else if let Some(t) = l.strip_prefix("author-time ") {
+            time = t.trim().parse().unwrap_or(0);
+        } else if let Some(t) = l.strip_prefix("summary ") {
+            summary = t.to_string();
+        } else if l.len() >= 40 && l.as_bytes()[..40].iter().all(u8::is_ascii_hexdigit) {
+            sha = l[..40].to_string();
+        }
+    }
+    Ok(lines)
+}
+
+fn load_refs(dir: &Path) -> GitResult<Vec<RefInfo>> {
+    let out = run(
+        dir,
+        &[
+            "for-each-ref",
+            "--format=%(refname)%1f%(objectname)%1f%(*objectname)%1f%(upstream:short)%1f%(upstream:track,nobracket)",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ],
+    )?;
+    let mut refs = Vec::new();
+    for line in out.lines() {
+        let f: Vec<&str> = line.split('\x1f').collect();
+        if f.len() < 5 {
+            continue;
+        }
+        let full = f[0];
+        // Annotated tags point at a tag object; the commit is the peeled `*objectname`.
+        let target = if f[2].is_empty() { f[1] } else { f[2] }.to_string();
+        let (kind, name) = if let Some(n) = full.strip_prefix("refs/heads/") {
+            (RefKind::Local, n)
+        } else if let Some(n) = full.strip_prefix("refs/remotes/") {
+            if n.ends_with("/HEAD") {
+                continue;
+            }
+            (RefKind::Remote, n)
+        } else if let Some(n) = full.strip_prefix("refs/tags/") {
+            (RefKind::Tag, n)
+        } else {
+            continue;
+        };
+        let (ahead, behind) = parse_track(f[4]);
+        refs.push(RefInfo {
+            name: name.to_string(),
+            kind,
+            target,
+            upstream: Some(f[3].to_string()).filter(|s| !s.is_empty()),
+            ahead,
+            behind,
+        });
+    }
+    Ok(refs)
+}
+
+fn parse_track(s: &str) -> (u32, u32) {
+    let mut ahead = 0;
+    let mut behind = 0;
+    for part in s.split(',') {
+        let part = part.trim();
+        if let Some(n) = part.strip_prefix("ahead ") {
+            ahead = n.parse().unwrap_or(0);
+        } else if let Some(n) = part.strip_prefix("behind ") {
+            behind = n.parse().unwrap_or(0);
+        }
+    }
+    (ahead, behind)
+}
+
+fn load_stashes(dir: &Path) -> Vec<Stash> {
+    run(dir, &["stash", "list", "--format=%gd%x1f%H%x1f%s"])
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\x1f').collect();
+            (f.len() >= 3).then(|| Stash {
+                reference: f[0].to_string(),
+                message: f[2].to_string(),
+            })
+        })
+        .collect()
+}
+
+pub fn load_status(dir: &Path) -> GitResult<WorkStatus> {
+    let out = run(dir, &["status", "--porcelain=v1", "-z", "-uall"])?;
+    let mut status = WorkStatus::default();
+    let mut entries = out.split('\0');
+    while let Some(entry) = entries.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let mut chars = entry.chars();
+        let x = chars.next().unwrap_or(' ');
+        let y = chars.next().unwrap_or(' ');
+        let path = entry[3..].to_string();
+        // With -z a rename is followed by its original path as a separate entry.
+        let old_path = if x == 'R' || x == 'C' {
+            entries.next().map(str::to_string)
+        } else {
+            None
+        };
+        let conflicted = x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D');
+        if conflicted {
+            status.unstaged.push(FileChange { path, old_path: None, state: FileState::Conflicted });
+            continue;
+        }
+        if x == '?' {
+            status.unstaged.push(FileChange { path, old_path: None, state: FileState::Untracked });
+            continue;
+        }
+        if x != ' ' {
+            status.staged.push(FileChange {
+                path: path.clone(),
+                old_path: old_path.clone(),
+                state: FileState::from_code(x),
+            });
+        }
+        if y != ' ' {
+            status.unstaged.push(FileChange { path, old_path: None, state: FileState::from_code(y) });
+        }
+    }
+    Ok(status)
+}
+
+/// Files changed by a commit, compared with its first parent.
+pub fn commit_files(dir: &Path, commit: &Commit) -> GitResult<Vec<FileChange>> {
+    let out = match commit.parents.first() {
+        Some(p) => run(dir, &["diff", "--name-status", "-z", "-M", p, &commit.sha])?,
+        None => run(dir, &["diff-tree", "--root", "-r", "--name-status", "-z", "-M", &commit.sha])?,
+    };
+    let mut files = Vec::new();
+    let mut it = out.split('\0').filter(|s| !s.is_empty());
+    // diff-tree --root prints the commit sha first.
+    while let Some(code) = it.next() {
+        if code.len() >= 40 && code.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        let c = code.chars().next().unwrap_or('M');
+        let state = FileState::from_code(c);
+        if c == 'R' || c == 'C' {
+            let old = it.next().unwrap_or_default().to_string();
+            let new = it.next().unwrap_or_default().to_string();
+            files.push(FileChange { path: new, old_path: Some(old), state });
+        } else if let Some(p) = it.next() {
+            files.push(FileChange { path: p.to_string(), old_path: None, state });
+        }
+    }
+    Ok(files)
+}
+
+pub fn full_message(dir: &Path, sha: &str) -> String {
+    run(dir, &["log", "-1", "--format=%B", sha]).unwrap_or_default().trim_end().to_string()
+}
+
+pub fn committer_line(dir: &Path, sha: &str) -> String {
+    run(dir, &["log", "-1", "--format=%cn <%ce>", sha]).unwrap_or_default().trim().to_string()
+}
+
+/// Which side of the working tree a diff is taken from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiffSource {
+    Unstaged,
+    Staged,
+    Commit { sha: String, parent: Option<String> },
+}
+
+/// The unified diff of one file, and whether it was cut at [`MAX_DIFF_BYTES`]. With `whole_file` the diff carries the entire file as context,
+/// which the inline and split views need.
+pub fn file_diff_ctx(dir: &Path, source: &DiffSource, file: &FileChange, whole_file: bool) -> (String, bool) {
+    let ctx = if whole_file { "-U100000000" } else { "-U3" };
+    match source {
+        DiffSource::Unstaged if file.state == FileState::Untracked => {
+            let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+            run_lenient(dir, &["diff", "--no-color", ctx, "--no-index", "--", null, &file.path])
+        }
+        DiffSource::Unstaged => run_lenient(dir, &["diff", "--no-color", ctx, "--", &file.path]),
+        DiffSource::Staged => run_lenient(dir, &["diff", "--no-color", ctx, "--cached", "-M", "--", &file.path]),
+        DiffSource::Commit { sha, parent: Some(p) } => {
+            let mut args = vec!["diff", "--no-color", ctx, "-M", p.as_str(), sha.as_str(), "--"];
+            if let Some(old) = &file.old_path {
+                args.push(old);
+            }
+            args.push(&file.path);
+            run_lenient(dir, &args)
+        }
+        DiffSource::Commit { sha, parent: None } => {
+            run_lenient(dir, &["show", "--no-color", ctx, "--format=", sha, "--", &file.path])
+        }
+    }
+}
+
+/// Short sha for display.
+pub fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(7)]
+}
