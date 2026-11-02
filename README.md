@@ -4,7 +4,7 @@ A fast, friendly desktop Git client written in Rust with [egui](https://github.c
 No AI features, no account, no subscription: it drives your own `git` install, so credentials,
 hooks, config and SSH keys behave exactly as they do in a terminal.
 
-![Commit graph, branch sidebar and staging panel](shots/v6-fold.png)
+![Commit graph, branch sidebar and staging panel](shots/vegit.png)
 
 ## Features
 
@@ -63,8 +63,12 @@ cargo test
 ```
 
 The tests run the git layer against throwaway repositories in the temp folder (log, refs and status
-parsing, hunk staging, graph layout). One test lists the open pull requests of a public GitHub
-repository and needs network access.
+parsing, hunk staging, graph layout). One extra test lists the open pull requests of a public GitHub
+repository; it needs network access, so it is ignored by default. Run it with:
+
+```bash
+cargo test -- --ignored
+```
 
 ## Project layout
 

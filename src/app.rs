@@ -1,7 +1,7 @@
 //! Application state, the action queue and the git operations behind every button.
 //!
 //! UI code never runs git directly: it pushes [`Action`]s while drawing, and
-//! [`GroveApp::handle`] turns them into [`Task`]s for one worker thread. The window thread
+//! [`VegitApp::handle`] turns them into [`Task`]s for one worker thread. The window thread
 //! never waits on git, so a huge diff (a Unity scene, a big asset import) can take its time
 //! without freezing anything. Tasks run in order, which keeps "stage, then reload" correct.
 //! Network operations (fetch, pull, push, clone) get their own threads so local work
@@ -25,7 +25,7 @@ use crate::graph::{self, GraphLayout};
 use crate::preview;
 use crate::theme::{self, Palette, ThemeChoice};
 
-pub const SETTINGS_KEY: &str = "grove_settings";
+pub const SETTINGS_KEY: &str = "vegit_settings";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -445,7 +445,7 @@ pub struct ScreenshotJob {
     pub done: Arc<AtomicBool>,
 }
 
-pub struct GroveApp {
+pub struct VegitApp {
     pub tabs: Vec<RepoTab>,
     pub active: usize,
     pub show_home: bool,
@@ -466,7 +466,7 @@ pub struct GroveApp {
     next_token: u64,
 }
 
-impl GroveApp {
+impl VegitApp {
     pub fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<PathBuf>) -> Self {
         let settings: Settings = if screenshot.is_some() {
             Settings::default()
@@ -507,42 +507,42 @@ impl GroveApp {
         if app.screenshot.is_some() {
             app.open_sample();
             // Preview switches for checking other screens in screenshot mode.
-            if let Ok(v) = std::env::var("GROVE_THEME") {
+            if let Ok(v) = std::env::var("VEGIT_THEME") {
                 if let Some(t) = ThemeChoice::ALL.iter().find(|t| format!("{t:?}").eq_ignore_ascii_case(&v)) {
                     app.settings.theme = *t;
                 }
             }
-            if let Ok(which) = std::env::var("GROVE_PREVIEW_DIFF") {
+            if let Ok(which) = std::env::var("VEGIT_PREVIEW_DIFF") {
                 let files = &app.tabs[0].snap.status.unstaged;
                 let pick = files.iter().find(|f| f.path.ends_with(&which)).or(files.first()).cloned();
                 if let Some(f) = pick {
                     app.actions.push(Action::OpenDiff(DiffSource::Unstaged, f));
                 }
             }
-            if let Ok(m) = std::env::var("GROVE_DIFF_MODE") {
+            if let Ok(m) = std::env::var("VEGIT_DIFF_MODE") {
                 app.settings.diff_mode = match m.as_str() {
                     "split" => DiffMode::Split,
                     "inline" => DiffMode::Inline,
                     _ => DiffMode::Hunk,
                 };
             }
-            if std::env::var_os("GROVE_PREVIEW_HISTORY").is_some() {
+            if std::env::var_os("VEGIT_PREVIEW_HISTORY").is_some() {
                 app.actions.push(Action::FileHistory("src/search/panel.rs".into()));
             }
-            if std::env::var_os("GROVE_PREVIEW_PICK").is_some() {
+            if std::env::var_os("VEGIT_PREVIEW_PICK").is_some() {
                 let t = &mut app.tabs[0];
                 t.picked = t.snap.status.unstaged.iter().take(2).map(|f| f.path.clone()).collect();
             }
-            if std::env::var_os("GROVE_PREVIEW_PR").is_some() {
+            if std::env::var_os("VEGIT_PREVIEW_PR").is_some() {
                 app.actions.push(Action::OpenPullRequestForm);
             }
-            if std::env::var_os("GROVE_FOLD_STAGED").is_some() {
+            if std::env::var_os("VEGIT_FOLD_STAGED").is_some() {
                 app.tabs[0].folded[1] = true;
             }
-            if std::env::var_os("GROVE_TREE").is_some() {
+            if std::env::var_os("VEGIT_TREE").is_some() {
                 app.settings.tree_view = true;
             }
-            if std::env::var_os("GROVE_PREVIEW_ACCESS").is_some() {
+            if std::env::var_os("VEGIT_PREVIEW_ACCESS").is_some() {
                 app.actions.push(Action::Dialog(Dialog::Access(AccessForm { host: "github.com".into(), ..Default::default() })));
             }
         } else {

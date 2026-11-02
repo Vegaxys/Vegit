@@ -1,6 +1,6 @@
-//! Grove: a friendly desktop git client.
+//! Vegit: a friendly desktop git client.
 //!
-//! Usage: `grove [repository-folder]` or `grove --screenshot <file.png>` (draws about
+//! Usage: `vegit [repository-folder]` or `vegit --screenshot <file.png>` (draws about
 //! 120 frames of the sample project, saves the window as a PNG and exits).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -44,7 +44,7 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Grove")
+            .with_title("Vegit")
             .with_inner_size([1440.0, 880.0])
             .with_min_inner_size([900.0, 560.0])
             // The theme draws the whole window, title bar included.
@@ -54,10 +54,10 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "Grove",
+        "Vegit",
         options,
         Box::new(move |cc| {
-            let mut app = app::GroveApp::new(cc, screenshot);
+            let mut app = app::VegitApp::new(cc, screenshot);
             if let Some(p) = open {
                 if let Err(e) = app.open_repo(&p, true) {
                     eprintln!("{e}");

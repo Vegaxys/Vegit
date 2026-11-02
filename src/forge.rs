@@ -136,14 +136,14 @@ fn request(method: &str, url: &str, repo: &RemoteRepo, cred: &Option<(String, St
     let agent = agent();
     let mut resp = match (method, body) {
         ("POST", Some(b)) => {
-            let mut req = agent.post(url).header("User-Agent", "Grove").header("Accept", "application/json");
+            let mut req = agent.post(url).header("User-Agent", "Vegit").header("Accept", "application/json");
             if let Some(h) = auth_header(repo.forge, cred) {
                 req = req.header("Authorization", &h);
             }
             req.send_json(b)
         }
         _ => {
-            let mut req = agent.get(url).header("User-Agent", "Grove").header("Accept", "application/json");
+            let mut req = agent.get(url).header("User-Agent", "Vegit").header("Accept", "application/json");
             if let Some(h) = auth_header(repo.forge, cred) {
                 req = req.header("Authorization", &h);
             }
@@ -414,7 +414,7 @@ mod live_tests {
     #[test]
     #[ignore]
     fn lists_open_pull_requests_of_a_public_github_repo() {
-        let dir = std::env::temp_dir().join(format!("grove-pr-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vegit-pr-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         crate::git::run(&dir, &["init", "-q"]).unwrap();

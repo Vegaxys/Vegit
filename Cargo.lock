@@ -1509,20 +1509,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "grove"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "eframe",
- "image",
- "resvg",
- "rfd",
- "serde",
- "serde_json",
- "ureq",
-]
-
-[[package]]
 name = "guillotiere"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3908,6 +3894,20 @@ dependencies = [
  "js-sys",
  "serde_core",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "vegit"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "eframe",
+ "image",
+ "resvg",
+ "rfd",
+ "serde",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]

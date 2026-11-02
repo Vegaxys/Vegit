@@ -98,7 +98,7 @@ pub fn create_ssh_key() -> Result<String, String> {
     }
     std::fs::create_dir_all(&dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
     let comment = git::run(&dirs_home(), &["config", "--get", "user.email"]).unwrap_or_default().trim().to_string();
-    let comment = if comment.is_empty() { "grove".to_string() } else { comment };
+    let comment = if comment.is_empty() { "vegit".to_string() } else { comment };
     let key_s = key.display().to_string();
     let mut last_err = String::from("ssh-keygen was not found");
     for exe in keygen_candidates() {

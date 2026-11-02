@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use eframe::egui::{self, Align2, Color32, CornerRadius, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 use crate::access;
-use crate::app::{AccessForm, Action, Dialog, GroveApp, PrForm, PullMode, ToastKind, dirs_home, save_screenshot};
+use crate::app::{AccessForm, Action, Dialog, PrForm, PullMode, ToastKind, VegitApp, dirs_home, save_screenshot};
 use crate::forge::Forge;
 use crate::git::{self, FileState, RefKind};
 use crate::icons::{self, Icon};
@@ -20,7 +20,7 @@ use crate::{ui_detail, ui_graph, ui_side};
 const SCREENSHOT_FRAME: u32 = 120;
 const HEADER_H: f32 = 44.0;
 
-impl eframe::App for GroveApp {
+impl eframe::App for VegitApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.ensure_theme(&ctx);
@@ -67,7 +67,7 @@ impl eframe::App for GroveApp {
     }
 }
 
-impl GroveApp {
+impl VegitApp {
     fn screenshot_tick(&mut self, ctx: &egui::Context) {
         let Some(job) = self.screenshot.as_mut() else { return };
         job.frame += 1;
@@ -122,7 +122,7 @@ impl GroveApp {
             p.circle_filled(a, 4.0, pal.lane(0));
             p.circle_filled(b, 4.0, pal.lane(0));
             p.circle_filled(c, 4.0, pal.lane(1));
-            ui.label(RichText::new("Grove").strong().size(15.0));
+            ui.label(RichText::new("Vegit").strong().size(15.0));
             ui.add_space(14.0);
 
             for i in 0..self.tabs.len() {
@@ -433,7 +433,7 @@ impl GroveApp {
             ui.vertical_centered(|ui| {
                 ui.set_max_width(860.0);
                 ui.add_space(12.0);
-                ui.label(RichText::new("Welcome to Grove").size(34.0).strong());
+                ui.label(RichText::new("Welcome to Vegit").size(34.0).strong());
                 ui.label(RichText::new("See your project's history, stage changes and share your work.").color(pal.muted));
                 ui.add_space(20.0);
                 ui.spacing_mut().item_spacing = vec2(GAP as f32 * 1.5, GAP as f32 * 1.5);

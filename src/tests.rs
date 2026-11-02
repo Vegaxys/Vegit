@@ -8,7 +8,7 @@ use crate::git::{self, DiffSource, FileState};
 use crate::graph;
 
 fn temp_repo(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("grove-test-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("vegit-test-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     g(&dir, &["init", "-q", "-b", "main"]);
