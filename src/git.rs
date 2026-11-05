@@ -21,6 +21,8 @@ pub struct Commit {
     pub summary: String,
     /// First line of the description, shown after the summary in a quieter colour.
     pub body: String,
+    /// `stash@{n}` when this row is a stash rather than a real commit of a branch.
+    pub stash: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +50,12 @@ pub struct Stash {
     /// `stash@{0}` style reference used by `git stash apply/pop/drop`.
     pub reference: String,
     pub message: String,
+    pub sha: String,
+    /// The commit the stash was made on.
+    pub base: Option<String>,
+    pub time: i64,
+    pub author: String,
+    pub email: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,6 +157,8 @@ pub struct Snapshot {
     pub remotes: Vec<String>,
     /// Submodule folders, relative to the repository root.
     pub submodules: Vec<String>,
+    /// (remote name, fetch URL), for links to the hosting service.
+    pub remote_urls: Vec<(String, String)>,
 }
 
 impl Snapshot {
@@ -312,7 +322,13 @@ pub fn load_snapshot(dir: &Path) -> GitResult<Snapshot> {
 
     if snap.head_sha.is_some() {
         snap.commits = load_commits(dir)?;
+        insert_stashes(&mut snap.commits, &snap.stashes);
     }
+    snap.remote_urls = snap
+        .remotes
+        .iter()
+        .map(|r| (r.clone(), run(dir, &["remote", "get-url", r]).unwrap_or_default().trim().to_string()))
+        .collect();
     // Read .gitmodules directly: `git submodule status` can be slow on big projects.
     if dir.join(".gitmodules").exists() {
         snap.submodules = run(dir, &["config", "--file", ".gitmodules", "--get-regexp", r"\.path$"])
@@ -370,6 +386,7 @@ fn load_commits(dir: &Path) -> GitResult<Vec<Commit>> {
             time: f[4].trim().parse().unwrap_or(0),
             summary: f[5].trim_end().to_string(),
             body: f.get(6).map(|b| first_line(b)).unwrap_or_default(),
+            stash: None,
         });
     }
     Ok(commits)
@@ -409,6 +426,7 @@ pub fn file_log(dir: &Path, path: &str) -> GitResult<Vec<HistoryEntry>> {
                 time: f[4].trim().parse().unwrap_or(0),
                 summary: f[5].trim_end().to_string(),
                 body: String::new(),
+                stash: None,
             },
             path: file,
         });
@@ -526,17 +544,46 @@ fn parse_track(s: &str) -> (u32, u32) {
 }
 
 fn load_stashes(dir: &Path) -> Vec<Stash> {
-    run(dir, &["stash", "list", "--format=%gd%x1f%H%x1f%s"])
+    run(dir, &["stash", "list", "--format=%gd%x1f%H%x1f%s%x1f%P%x1f%at%x1f%an%x1f%ae"])
         .unwrap_or_default()
         .lines()
         .filter_map(|l| {
             let f: Vec<&str> = l.split('\x1f').collect();
-            (f.len() >= 3).then(|| Stash {
+            (f.len() >= 7).then(|| Stash {
                 reference: f[0].to_string(),
+                sha: f[1].to_string(),
                 message: f[2].to_string(),
+                base: f[3].split_whitespace().next().map(str::to_string),
+                time: f[4].trim().parse().unwrap_or(0),
+                author: f[5].to_string(),
+                email: f[6].to_string(),
             })
         })
         .collect()
+}
+
+/// Adds each stash to the history as a row attached to the commit it was made on.
+/// Its other parents (index and untracked snapshots) are left out on purpose: they are
+/// git's bookkeeping, not history anyone wants to see.
+pub fn insert_stashes(commits: &mut Vec<Commit>, stashes: &[Stash]) {
+    for st in stashes {
+        let Some(base_idx) = st.base.as_ref().and_then(|b| commits.iter().position(|c| &c.sha == b)) else { continue };
+        let by_time = commits.iter().position(|c| c.time <= st.time).unwrap_or(commits.len());
+        let at = by_time.min(base_idx);
+        commits.insert(
+            at,
+            Commit {
+                sha: st.sha.clone(),
+                parents: vec![commits[base_idx].sha.clone()],
+                author: st.author.clone(),
+                email: st.email.clone(),
+                time: st.time,
+                summary: st.message.clone(),
+                body: String::new(),
+                stash: Some(st.reference.clone()),
+            },
+        );
+    }
 }
 
 pub fn load_status(dir: &Path) -> GitResult<WorkStatus> {

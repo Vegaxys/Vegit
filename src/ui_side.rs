@@ -18,124 +18,35 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
     let keep = |name: &str| filter.is_empty() || name.to_lowercase().contains(&filter);
 
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        // Local branches
-        let locals: Vec<usize> = (0..tab.snap.refs.len())
+        // Branch names never wrap: long ones end with "…".
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+        let filtering = !filter.is_empty();
+
+        // Local branches, grouped in folders by their "folder/" prefixes.
+        let locals: Vec<(String, usize)> = (0..tab.snap.refs.len())
             .filter(|&i| tab.snap.refs[i].kind == RefKind::Local && keep(&tab.snap.refs[i].name))
+            .map(|i| (tab.snap.refs[i].name.clone(), i))
             .collect();
-        section(ui, "local", &format!("💻  Local  ({})", locals.len()), pal, |ui| {
+        let count = locals.len();
+        section(ui, "local", &format!("💻  Local  ({count})"), pal, |ui| {
             if locals.is_empty() {
                 ui.label(RichText::new("No branches yet").color(pal.muted));
             }
-            for i in locals {
-                let r = &tab.snap.refs[i];
-                let is_head = tab.snap.head_branch.as_deref() == Some(r.name.as_str());
-                let mut text = if is_head { format!("✔ {}", r.name) } else { format!("   {}", r.name) };
-                if r.ahead > 0 {
-                    text.push_str(&format!("   ↑{}", r.ahead));
-                }
-                if r.behind > 0 {
-                    text.push_str(&format!(" ↓{}", r.behind));
-                }
-                let rich = if is_head { RichText::new(text).strong().color(pal.accent) } else { RichText::new(text).color(pal.text2()) };
-                let resp = ui.add(egui::Button::selectable(false, rich).frame_when_inactive(false)).on_hover_text(
-                    "Click to show in the graph · double-click to switch to it · right-click for more",
-                );
-                if resp.clicked() {
-                    acts.push(Action::SelectRef(r.target.clone()));
-                }
-                if resp.double_clicked() && !is_head {
-                    acts.push(Action::CheckoutLocal(r.name.clone()));
-                }
-                let name = r.name.clone();
-                let current = tab.snap.head_branch.clone();
-                resp.context_menu(|ui| {
-                    if !is_head && ui.button(format!("Switch to {name}")).clicked() {
-                        acts.push(Action::CheckoutLocal(name.clone()));
-                        ui.close();
-                    }
-                    if let (false, Some(cur)) = (is_head, current.as_ref()) {
-                        if ui.button(format!("Merge {name} into {cur}")).clicked() {
-                            acts.push(Action::Git { label: format!("Merged {name}"), args: vec!["merge".into(), "--no-edit".into(), name.clone()], background: false });
-                            ui.close();
-                        }
-                        if ui.button(format!("Rebase {cur} onto {name}")).clicked() {
-                            acts.push(Action::Git { label: format!("Rebased onto {name}"), args: vec!["rebase".into(), name.clone()], background: false });
-                            ui.close();
-                        }
-                    }
-                    if ui.button("New branch from here…").clicked() {
-                        acts.push(Action::Dialog(Dialog::NewBranch { at: Some(name.clone()), name: String::new(), checkout: true }));
-                        ui.close();
-                    }
-                    if ui.button("Rename…").clicked() {
-                        acts.push(Action::Dialog(Dialog::RenameBranch { old: name.clone(), name: name.clone() }));
-                        ui.close();
-                    }
-                    if ui.button("Copy name").clicked() {
-                        acts.push(Action::Copy(name.clone()));
-                        ui.close();
-                    }
-                    if !is_head {
-                        ui.separator();
-                        if ui.button(RichText::new("Delete branch").color(pal.removed)).clicked() {
-                            acts.push(Action::Dialog(Dialog::Confirm {
-                                title: format!("Delete {name}?"),
-                                body: "Git refuses if the branch has commits that aren't merged anywhere else.".into(),
-                                confirm: "Delete".into(),
-                                then: Box::new(Action::Git { label: format!("Deleted {name}"), args: vec!["branch".into(), "-d".into(), name.clone()], background: false }),
-                            }));
-                            ui.close();
-                        }
-                    }
-                });
-            }
+            branch_tree(ui, "local", &locals, filtering, pal, &mut |ui, leaf, i| local_item(ui, tab, i, leaf, pal, acts));
         });
 
-        // Remote branches, grouped by remote
+        // Remote branches, one section per remote, also in folders.
         for remote in tab.snap.remotes.clone() {
             let prefix = format!("{remote}/");
-            let items: Vec<usize> = (0..tab.snap.refs.len())
+            let items: Vec<(String, usize)> = (0..tab.snap.refs.len())
                 .filter(|&i| {
                     let r = &tab.snap.refs[i];
                     r.kind == RefKind::Remote && r.name.starts_with(&prefix) && keep(&r.name)
                 })
+                .map(|i| (tab.snap.refs[i].name[prefix.len()..].to_string(), i))
                 .collect();
             section(ui, &format!("remote-{remote}"), &format!("☁  {remote}  ({})", items.len()), pal, |ui| {
-                for i in items {
-                    let r = &tab.snap.refs[i];
-                    let short = r.name[prefix.len()..].to_string();
-                    let resp = ui
-                        .add(egui::Button::selectable(false, RichText::new(format!("   {short}")).color(pal.text2())).frame_when_inactive(false))
-                        .on_hover_text("Double-click to check it out as a local branch");
-                    if resp.clicked() {
-                        acts.push(Action::SelectRef(r.target.clone()));
-                    }
-                    if resp.double_clicked() {
-                        acts.push(Action::CheckoutRemote(r.name.clone()));
-                    }
-                    let full = r.name.clone();
-                    let rem = remote.clone();
-                    resp.context_menu(|ui| {
-                        if ui.button("Check out as local branch").clicked() {
-                            acts.push(Action::CheckoutRemote(full.clone()));
-                            ui.close();
-                        }
-                        if ui.button(format!("Merge {full} into current")).clicked() {
-                            acts.push(Action::Git { label: format!("Merged {full}"), args: vec!["merge".into(), "--no-edit".into(), full.clone()], background: false });
-                            ui.close();
-                        }
-                        ui.separator();
-                        if ui.button(RichText::new("Delete on remote").color(pal.removed)).clicked() {
-                            acts.push(Action::Dialog(Dialog::Confirm {
-                                title: format!("Delete {full} on {rem}?"),
-                                body: "The branch will be removed from the server for everyone.".into(),
-                                confirm: "Delete".into(),
-                                then: Box::new(Action::Git { label: format!("Deleted {full}"), args: vec!["push".into(), rem.clone(), "--delete".into(), short.clone()], background: true }),
-                            }));
-                            ui.close();
-                        }
-                    });
-                }
+                branch_tree(ui, &format!("remote-{remote}"), &items, filtering, pal, &mut |ui, leaf, i| remote_item(ui, tab, i, &remote, leaf, pal, acts));
             });
         }
 
@@ -162,13 +73,15 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
                 }
             }
             PrState::Ready(repo, prs) => {
+                // Button first (right-aligned) so the service label is the part that shrinks.
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("{} · {}", repo.forge.name(), repo.path)).color(pal.muted).size(11.5));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let can = current.is_some();
-                        if ui.add_enabled(can, egui::Button::new(RichText::new("+ New").size(12.0))).on_hover_text(format!("Open a {} from the current branch", repo.forge.noun())).clicked() {
-                            acts.push(Action::OpenPullRequestForm);
+                        let new = egui::Button::new(RichText::new("+ New").size(12.0)).wrap_mode(egui::TextWrapMode::Extend);
+                        if ui.add_enabled(can, new).on_hover_text(format!("Open a {} from the current branch", repo.forge.noun())).clicked() {
+                            acts.push(Action::OpenPullRequestForm(None));
                         }
+                        ui.add(egui::Label::new(RichText::new(format!("{} · {}", repo.forge.name(), repo.path)).color(pal.muted).size(11.5)).truncate());
                     });
                 });
                 if prs.is_empty() {
@@ -291,6 +204,152 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
                 });
             }
         });
+    });
+}
+
+/// Draws branches grouped by "folder/" prefixes (feature/login → feature ▸ login).
+/// Folders start closed, except while filtering so matches are visible.
+fn branch_tree(ui: &mut egui::Ui, id: &str, items: &[(String, usize)], open: bool, pal: &Palette, leaf: &mut dyn FnMut(&mut egui::Ui, &str, usize)) {
+    let mut folders: Vec<(&str, Vec<(String, usize)>)> = Vec::new();
+    let mut leaves: Vec<(&str, usize)> = Vec::new();
+    for (path, i) in items {
+        match path.split_once('/') {
+            Some((folder, rest)) => match folders.iter_mut().find(|(f, _)| *f == folder) {
+                Some((_, v)) => v.push((rest.to_string(), *i)),
+                None => folders.push((folder, vec![(rest.to_string(), *i)])),
+            },
+            None => leaves.push((path.as_str(), *i)),
+        }
+    }
+    folders.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    leaves.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    for (folder, sub) in folders {
+        let sub_id = format!("{id}/{folder}");
+        let title = RichText::new(format!("{folder}  ({})", sub.len())).color(pal.text2());
+        let mut header = egui::CollapsingHeader::new(title).id_salt(&sub_id).default_open(false);
+        if open {
+            header = header.open(Some(true));
+        }
+        header.show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            branch_tree(ui, &sub_id, &sub, open, pal, leaf);
+        });
+    }
+    for (name, i) in leaves {
+        leaf(ui, name, i);
+    }
+}
+
+fn local_item(ui: &mut egui::Ui, tab: &RepoTab, i: usize, leaf: &str, pal: &Palette, acts: &mut Vec<Action>) {
+    let r = &tab.snap.refs[i];
+    let is_head = tab.snap.head_branch.as_deref() == Some(r.name.as_str());
+    let mut text = if is_head { format!("✔ {leaf}") } else { format!("   {leaf}") };
+    if r.ahead > 0 {
+        text.push_str(&format!("   ↑{}", r.ahead));
+    }
+    if r.behind > 0 {
+        text.push_str(&format!(" ↓{}", r.behind));
+    }
+    let rich = if is_head { RichText::new(text).strong().color(pal.accent) } else { RichText::new(text).color(pal.text2()) };
+    let resp = ui
+        .add(egui::Button::selectable(false, rich).frame_when_inactive(false).truncate())
+        .on_hover_text(format!("{}\nClick to show in the graph · double-click to switch to it · right-click for more", r.name));
+    if resp.clicked() {
+        acts.push(Action::SelectRef(r.target.clone()));
+    }
+    if resp.double_clicked() && !is_head {
+        acts.push(Action::CheckoutLocal(r.name.clone()));
+    }
+    let name = r.name.clone();
+    let current = tab.snap.head_branch.clone();
+    resp.context_menu(|ui| {
+        if !is_head && ui.button(format!("Switch to {name}")).clicked() {
+            acts.push(Action::CheckoutLocal(name.clone()));
+            ui.close();
+        }
+        if let (false, Some(cur)) = (is_head, current.as_ref()) {
+            if ui.button(format!("Merge {name} into {cur}")).clicked() {
+                acts.push(Action::Git { label: format!("Merged {name}"), args: vec!["merge".into(), "--no-edit".into(), name.clone()], background: false });
+                ui.close();
+            }
+            if ui.button(format!("Rebase {cur} onto {name}")).clicked() {
+                acts.push(Action::Git { label: format!("Rebased onto {name}"), args: vec!["rebase".into(), name.clone()], background: false });
+                ui.close();
+            }
+        }
+        if ui.button("Start a pull request…").clicked() {
+            acts.push(Action::OpenPullRequestForm(Some(name.clone())));
+            ui.close();
+        }
+        if ui.button("New branch from here…").clicked() {
+            acts.push(Action::Dialog(Dialog::NewBranch { at: Some(name.clone()), name: String::new(), checkout: true }));
+            ui.close();
+        }
+        if ui.button("Rename…").clicked() {
+            acts.push(Action::Dialog(Dialog::RenameBranch { old: name.clone(), name: name.clone() }));
+            ui.close();
+        }
+        if ui.button("Copy name").clicked() {
+            acts.push(Action::Copy(name.clone()));
+            ui.close();
+        }
+        if !is_head {
+            ui.separator();
+            if ui.button(RichText::new("Delete branch").color(pal.removed)).clicked() {
+                acts.push(Action::Dialog(Dialog::Confirm {
+                    title: format!("Delete {name}?"),
+                    body: "Git refuses if the branch has commits that aren't merged anywhere else.".into(),
+                    confirm: "Delete".into(),
+                    then: Box::new(Action::Git { label: format!("Deleted {name}"), args: vec!["branch".into(), "-d".into(), name.clone()], background: false }),
+                }));
+                ui.close();
+            }
+        }
+    });
+}
+
+fn remote_item(ui: &mut egui::Ui, tab: &RepoTab, i: usize, remote: &str, leaf: &str, pal: &Palette, acts: &mut Vec<Action>) {
+    let r = &tab.snap.refs[i];
+    let short = r.name[remote.len() + 1..].to_string();
+    let resp = ui
+        .add(egui::Button::selectable(false, RichText::new(format!("   {leaf}")).color(pal.text2())).frame_when_inactive(false).truncate())
+        .on_hover_text(format!("{}\nDouble-click to switch to it (as a local branch)", r.name));
+    if resp.clicked() {
+        acts.push(Action::SelectRef(r.target.clone()));
+    }
+    if resp.double_clicked() {
+        acts.push(Action::CheckoutRemote(r.name.clone()));
+    }
+    let full = r.name.clone();
+    let rem = remote.to_string();
+    let current = tab.snap.head_branch.clone().unwrap_or_else(|| "current".into());
+    resp.context_menu(|ui| {
+        if ui.button("Switch to it (local branch)").clicked() {
+            acts.push(Action::CheckoutRemote(full.clone()));
+            ui.close();
+        }
+        if ui.button(format!("Merge {full} into {current}")).clicked() {
+            acts.push(Action::Git { label: format!("Merged {full}"), args: vec!["merge".into(), "--no-edit".into(), full.clone()], background: false });
+            ui.close();
+        }
+        if ui.button(format!("Rebase {current} onto {full}")).clicked() {
+            acts.push(Action::Git { label: format!("Rebased onto {full}"), args: vec!["rebase".into(), full.clone()], background: false });
+            ui.close();
+        }
+        if ui.button("Copy name").clicked() {
+            acts.push(Action::Copy(short.clone()));
+            ui.close();
+        }
+        ui.separator();
+        if ui.button(RichText::new("Delete on remote").color(pal.removed)).clicked() {
+            acts.push(Action::Dialog(Dialog::Confirm {
+                title: format!("Delete {full} on {rem}?"),
+                body: "The branch will be removed from the server for everyone.".into(),
+                confirm: "Delete".into(),
+                then: Box::new(Action::Git { label: format!("Deleted {full}"), args: vec!["push".into(), rem.clone(), "--delete".into(), short.clone()], background: true }),
+            }));
+            ui.close();
+        }
     });
 }
 

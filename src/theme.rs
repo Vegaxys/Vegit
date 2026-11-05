@@ -257,17 +257,150 @@ impl ThemeChoice {
     }
 }
 
-fn load_font(candidates: &[&str]) -> Option<(String, Vec<u8>)> {
-    let dir = std::env::var_os("WINDIR").map(std::path::PathBuf::from).unwrap_or_else(|| "C:\\Windows".into()).join("Fonts");
-    candidates.iter().find_map(|f| std::fs::read(dir.join(f)).ok().map(|b| (f.to_string(), b)))
+fn fonts_dir() -> std::path::PathBuf {
+    std::env::var_os("WINDIR").map(std::path::PathBuf::from).unwrap_or_else(|| "C:\\Windows".into()).join("Fonts")
 }
 
-/// Installs the theme's fonts in front of egui's defaults.
-pub fn apply_fonts(ctx: &egui::Context, choice: ThemeChoice) {
-    let fc = choice.fonts();
+/// Reads a font: a bare file name is looked up in the system fonts folder, a full path
+/// (picked with "Other font file…") is read as is.
+fn load_font(candidates: &[&str]) -> Option<(String, Vec<u8>)> {
+    candidates.iter().find_map(|f| {
+        let path = std::path::Path::new(f);
+        let full = if path.is_absolute() { path.to_path_buf() } else { fonts_dir().join(f) };
+        std::fs::read(full).ok().map(|b| (f.to_string(), b))
+    })
+}
+
+/// Fonts offered in the settings, as (name, file). Only those present are listed.
+pub const FONT_CHOICES: &[(&str, &str)] = &[
+    ("Segoe UI", "segoeui.ttf"),
+    ("Calibri", "calibri.ttf"),
+    ("Candara", "Candara.ttf"),
+    ("Corbel", "corbel.ttf"),
+    ("Tahoma", "tahoma.ttf"),
+    ("Trebuchet MS", "trebuc.ttf"),
+    ("Verdana", "verdana.ttf"),
+    ("Arial", "arial.ttf"),
+    ("Georgia", "georgia.ttf"),
+    ("Cambria", "cambria.ttc"),
+    ("Cascadia Code", "CascadiaCode.ttf"),
+    ("Cascadia Mono", "CascadiaMono.ttf"),
+    ("Consolas", "consola.ttf"),
+    ("Lucida Console", "lucon.ttf"),
+    ("Courier New", "cour.ttf"),
+];
+
+pub fn installed_fonts() -> Vec<(&'static str, &'static str)> {
+    let dir = fonts_dir();
+    FONT_CHOICES.iter().copied().filter(|(_, f)| dir.join(f).exists()).collect()
+}
+
+/// How branch lanes are coloured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LaneMode {
+    /// The preset's own colours.
+    #[default]
+    Theme,
+    /// A smooth gradient starting at the interface colour.
+    Gradient,
+    Rainbow,
+    /// Random colours; "Shuffle" picks new ones.
+    Random,
+    /// Every branch in one colour.
+    Unicolor,
+    /// Lighter and darker shades of the interface colour.
+    FromUi,
+}
+
+impl LaneMode {
+    pub const ALL: [LaneMode; 6] = [Self::Theme, Self::Gradient, Self::Rainbow, Self::Random, Self::Unicolor, Self::FromUi];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Theme => "Theme colours",
+            Self::Gradient => "Gradient",
+            Self::Rainbow => "Rainbow",
+            Self::Random => "Random",
+            Self::Unicolor => "Single colour",
+            Self::FromUi => "From the interface colour",
+        }
+    }
+}
+
+/// Everything that shapes the look, taken from the settings.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Appearance {
+    pub theme: ThemeChoice,
+    pub accent: Option<[u8; 3]>,
+    pub ui_font: Option<String>,
+    pub code_font: Option<String>,
+    pub text_size: f32,
+    pub lanes: LaneMode,
+    pub lane_color: [u8; 3],
+    pub seed: u64,
+}
+
+impl Palette {
+    /// The preset's palette with the person's interface colour and branch colours applied.
+    pub fn build(a: &Appearance) -> Self {
+        let mut p = Palette::of(a.theme);
+        if let Some([r, g, b]) = a.accent {
+            let c = Color32::from_rgb(r, g, b);
+            p.accent = c;
+            p.selected = mix(c, p.panel, 0.72);
+            let lum = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+            p.accent_text = if lum > 150.0 { Color32::from_rgb(0x15, 0x15, 0x18) } else { Color32::WHITE };
+        }
+        let (s, v) = if p.dark { (0.62, 0.95) } else { (0.7, 0.72) };
+        let hsv = |h: f32, s: f32, v: f32| -> Color32 { egui::ecolor::Hsva::new(h.rem_euclid(1.0), s, v, 1.0).into() };
+        let accent_h = egui::ecolor::Hsva::from(p.accent).h;
+        match a.lanes {
+            LaneMode::Theme => {}
+            LaneMode::Gradient => {
+                for i in 0..8 {
+                    p.lanes[i] = hsv(accent_h + i as f32 * 0.055, s, v);
+                }
+            }
+            LaneMode::Rainbow => {
+                for i in 0..8 {
+                    p.lanes[i] = hsv(i as f32 / 8.0, s, v);
+                }
+            }
+            LaneMode::Random => {
+                let mut x = a.seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407) | 1;
+                for i in 0..8 {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    p.lanes[i] = hsv((x % 1000) as f32 / 1000.0, s, v);
+                }
+            }
+            LaneMode::Unicolor => {
+                let [r, g, b] = a.lane_color;
+                p.lanes = [Color32::from_rgb(r, g, b); 8];
+            }
+            LaneMode::FromUi => {
+                let base = egui::ecolor::Hsva::from(p.accent);
+                for i in 0..8 {
+                    let t = i as f32 / 7.0;
+                    p.lanes[i] = hsv(base.h, (base.s * (1.0 - 0.5 * t)).clamp(0.2, 1.0), (0.55 + 0.45 * (1.0 - (t - 0.5).abs() * 2.0)).clamp(0.4, 1.0));
+                }
+            }
+        }
+        p
+    }
+}
+
+/// Installs the fonts (the person's choice, or the preset's) in front of egui's defaults.
+pub fn apply_fonts(ctx: &egui::Context, a: &Appearance) {
+    let fc = a.theme.fonts();
     let mut fonts = egui::FontDefinitions::default();
-    for (family, candidates) in [(egui::FontFamily::Proportional, fc.ui), (egui::FontFamily::Monospace, fc.code)] {
-        if let Some((name, bytes)) = load_font(candidates) {
+    let ui_override = a.ui_font.as_deref().map(|f| vec![f]);
+    let code_override = a.code_font.as_deref().map(|f| vec![f]);
+    let ui_list: Vec<&str> = ui_override.unwrap_or_else(|| fc.ui.to_vec());
+    let code_list: Vec<&str> = code_override.unwrap_or_else(|| fc.code.to_vec());
+    for (family, candidates) in [(egui::FontFamily::Proportional, ui_list), (egui::FontFamily::Monospace, code_list)] {
+        if let Some((name, bytes)) = load_font(&candidates) {
             fonts.font_data.insert(name.clone(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
             fonts.families.entry(family).or_default().insert(0, name);
         }
@@ -275,9 +408,10 @@ pub fn apply_fonts(ctx: &egui::Context, choice: ThemeChoice) {
     ctx.set_fonts(fonts);
 }
 
-pub fn apply(ctx: &egui::Context, choice: ThemeChoice) {
-    apply_fonts(ctx, choice);
-    let p = Palette::of(choice);
+pub fn apply(ctx: &egui::Context, a: &Appearance) {
+    apply_fonts(ctx, a);
+    let p = Palette::build(a);
+    let size = a.text_size.clamp(11.0, 18.0);
     let mut v = if p.dark { egui::Visuals::dark() } else { egui::Visuals::light() };
     let r = CornerRadius::same(10);
     v.panel_fill = p.canvas;
@@ -303,7 +437,9 @@ pub fn apply(ctx: &egui::Context, choice: ThemeChoice) {
     w.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
     w.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
     w.noninteractive.corner_radius = r;
-    w.inactive.bg_fill = p.card;
+    // Checkboxes and slider rails use bg_fill, buttons use weak_bg_fill: a lighter
+    // bg_fill keeps check boxes visible even when they sit on a card.
+    w.inactive.bg_fill = mix(p.card, p.text, 0.14);
     w.inactive.weak_bg_fill = p.card;
     w.inactive.bg_stroke = Stroke::NONE;
     w.inactive.fg_stroke = Stroke::new(1.0, p.text);
@@ -334,11 +470,11 @@ pub fn apply(ctx: &egui::Context, choice: ThemeChoice) {
             s.interaction.selectable_labels = false;
             s.spacing.button_padding = egui::vec2(12.0, 6.0);
             s.spacing.interact_size.y = 28.0;
-            s.text_styles.insert(egui::TextStyle::Body, egui::FontId::proportional(13.5));
-            s.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(13.5));
-            s.text_styles.insert(egui::TextStyle::Small, egui::FontId::proportional(11.0));
-            s.text_styles.insert(egui::TextStyle::Monospace, egui::FontId::monospace(12.5));
-            s.text_styles.insert(egui::TextStyle::Heading, egui::FontId::proportional(22.0));
+            s.text_styles.insert(egui::TextStyle::Body, egui::FontId::proportional(size));
+            s.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(size));
+            s.text_styles.insert(egui::TextStyle::Small, egui::FontId::proportional(size - 2.5));
+            s.text_styles.insert(egui::TextStyle::Monospace, egui::FontId::monospace(size - 1.0));
+            s.text_styles.insert(egui::TextStyle::Heading, egui::FontId::proportional(size + 8.5));
         });
     }
 }

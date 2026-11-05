@@ -6,6 +6,7 @@
 //! compacted, which keeps lines from shifting sideways between rows.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::git::Commit;
 
@@ -32,12 +33,30 @@ pub struct GraphLayout {
     pub width: usize,
 }
 
-pub fn layout(commits: &[Commit]) -> GraphLayout {
+/// "Pin the current branch to the left" setting, read by the worker when it lays out graphs.
+pub static PIN_HEAD: AtomicBool = AtomicBool::new(true);
+
+/// Lays out the graph, with the checked-out branch on the first column when the pin
+/// setting is on and `head` is given.
+pub fn layout_for(commits: &[Commit], head: Option<&str>) -> GraphLayout {
+    let pin = if PIN_HEAD.load(Ordering::Relaxed) { head } else { None };
+    layout(commits, pin)
+}
+
+/// `pin`: a commit whose first-parent line keeps lane 0 for itself; no other branch may use
+/// that lane, so the current branch reads as a straight line on the left.
+pub fn layout(commits: &[Commit], pin: Option<&str>) -> GraphLayout {
     let index: HashMap<&str, usize> = commits.iter().enumerate().map(|(i, c)| (c.sha.as_str(), i)).collect();
+    let pin = pin.filter(|p| index.contains_key(p));
 
     // lanes[i] = sha the lane is waiting for, with the lane's colour.
     let mut lanes: Vec<Option<(String, usize)>> = Vec::new();
     let mut next_color = 0usize;
+    let first_free = usize::from(pin.is_some());
+    if let Some(p) = pin {
+        lanes.push(Some((p.to_string(), 0)));
+        next_color = 1;
+    }
     let mut rows: Vec<Row> = Vec::with_capacity(commits.len());
     // For each row: lanes after the row was processed, and which lanes the row itself started.
     let mut after_states: Vec<Vec<Option<(String, usize)>>> = Vec::with_capacity(commits.len());
@@ -49,7 +68,7 @@ pub fn layout(commits: &[Commit]) -> GraphLayout {
         let col = match lanes.iter().position(|l| l.as_ref().is_some_and(|(s, _)| s == &c.sha)) {
             Some(i) => i,
             None => {
-                let i = free_lane(&mut lanes);
+                let i = free_lane(&mut lanes, first_free);
                 lanes[i] = Some((c.sha.clone(), next_color));
                 next_color += 1;
                 i
@@ -81,7 +100,7 @@ pub fn layout(commits: &[Commit]) -> GraphLayout {
             let (lane, lane_color) = if pi == 0 {
                 (col, color)
             } else {
-                let i = free_lane(&mut lanes);
+                let i = free_lane(&mut lanes, first_free);
                 next_color += 1;
                 (i, next_color - 1)
             };
@@ -119,9 +138,12 @@ pub fn layout(commits: &[Commit]) -> GraphLayout {
     GraphLayout { rows, width }
 }
 
-fn free_lane(lanes: &mut Vec<Option<(String, usize)>>) -> usize {
-    match lanes.iter().position(Option::is_none) {
-        Some(i) => i,
+fn free_lane(lanes: &mut Vec<Option<(String, usize)>>, first: usize) -> usize {
+    while lanes.len() < first {
+        lanes.push(None);
+    }
+    match lanes.iter().skip(first).position(Option::is_none) {
+        Some(i) => i + first,
         None => {
             lanes.push(None);
             lanes.len() - 1

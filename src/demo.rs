@@ -45,7 +45,7 @@ pub fn snapshot() -> Snapshot {
         ("Lee Chen", "lee@example.com"),
         ("Jo Dubois", "jo@example.com"),
     ];
-    let commits: Vec<Commit> = spec
+    let mut commits: Vec<Commit> = spec
         .iter()
         .map(|(id, parents, a, mins, msg)| Commit {
             sha: sha(*id),
@@ -66,8 +66,19 @@ pub fn snapshot() -> Snapshot {
                 _ => "",
             }
             .to_string(),
+            stash: None,
         })
         .collect();
+    let stashes = vec![Stash {
+        reference: "stash@{0}".into(),
+        message: "WIP on main: try a new icon set".into(),
+        sha: sha(99),
+        base: Some(sha(25)),
+        time: NOW - 270 * 60,
+        author: "Alex Martin".into(),
+        email: "alex@example.com".into(),
+    }];
+    crate::git::insert_stashes(&mut commits, &stashes);
 
     let r = |name: &str, kind: RefKind, id: u32, up: Option<&str>, ahead: u32, behind: u32| RefInfo {
         name: name.to_string(),
@@ -91,10 +102,7 @@ pub fn snapshot() -> Snapshot {
     Snapshot {
         commits,
         refs,
-        stashes: vec![Stash {
-            reference: "stash@{0}".into(),
-            message: "WIP on main: try a new icon set".into(),
-        }],
+        stashes,
         head_sha: Some(sha(30)),
         head_branch: Some("main".into()),
         status: WorkStatus {
@@ -108,6 +116,7 @@ pub fn snapshot() -> Snapshot {
         pending: None,
         remotes: vec!["origin".into()],
         submodules: vec!["libs/shared-ui".into()],
+        remote_urls: vec![("origin".into(), "https://github.com/acme/sample-project.git".into())],
     }
 }
 

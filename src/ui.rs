@@ -8,11 +8,11 @@ use std::sync::atomic::Ordering;
 use eframe::egui::{self, Align2, Color32, CornerRadius, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 use crate::access;
-use crate::app::{AccessForm, Action, Dialog, PrForm, PullMode, ToastKind, VegitApp, dirs_home, save_screenshot};
+use crate::app::{AccessForm, Action, Dialog, PrForm, PullMode, Settings, ToastKind, VegitApp, dirs_home, save_screenshot};
 use crate::forge::Forge;
 use crate::git::{self, FileState, RefKind};
 use crate::icons::{self, Icon};
-use crate::theme::{Palette, ThemeChoice};
+use crate::theme::{self, LaneMode, Palette, ThemeChoice};
 use crate::util::{GAP, accent_button, card, fill_tile, tile};
 use crate::{ui_detail, ui_graph, ui_side};
 
@@ -161,6 +161,9 @@ impl VegitApp {
                 if ui.add(access_btn).on_hover_text("Sign in to reach private repositories").clicked() {
                     self.actions.push(Action::Dialog(Dialog::Access(AccessForm { host: "github.com".into(), ..Default::default() })));
                 }
+                if icons::icon_button(ui, Icon::Gear, pal.text2(), pal.panel, pal.hover).on_hover_text("Settings").clicked() {
+                    self.actions.push(Action::Dialog(Dialog::Settings));
+                }
                 self.theme_menu(ui, pal);
                 if !self.busy.is_empty() || self.pending > 0 {
                     ui.add(egui::Spinner::new());
@@ -174,28 +177,20 @@ impl VegitApp {
     fn theme_menu(&mut self, ui: &mut egui::Ui, pal: &Palette) {
         let current = self.settings.theme;
         ui.menu_button(RichText::new(format!("🎨  {}", current.label())), |ui| {
-            ui.label(RichText::new("Theme").weak());
+            ui.set_min_width(330.0);
+            ui.label(RichText::new("Theme preset").weak());
+            // Whole rows are clickable, not just the name.
             for t in ThemeChoice::ALL {
-                let tp = Palette::of(t);
-                let resp = ui
-                    .horizontal(|ui| {
-                        let (r, _) = ui.allocate_exact_size(vec2(64.0, 18.0), Sense::hover());
-                        let p = ui.painter();
-                        p.rect_filled(r, CornerRadius::same(9), tp.canvas);
-                        for (k, col) in [tp.panel, tp.accent, tp.lane(1), tp.lane(2)].iter().enumerate() {
-                            p.circle_filled(pos2(r.left() + 10.0 + k as f32 * 15.0, r.center().y), 5.5, *col);
-                        }
-                        let r = ui.selectable_label(t == current, t.label());
-                        ui.label(RichText::new(t.fonts().label).size(11.0).color(tp.muted));
-                        r
-                    })
-                    .inner;
-                if resp.clicked() {
+                if preset_row(ui, t, t == current, pal).clicked() {
                     self.actions.push(Action::SetTheme(t));
                     ui.close();
                 }
             }
-            let _ = pal;
+            ui.separator();
+            if ui.button("All appearance settings…").clicked() {
+                self.actions.push(Action::Dialog(Dialog::Settings));
+                ui.close();
+            }
         });
     }
 
@@ -205,6 +200,8 @@ impl VegitApp {
         let active = self.active;
         let tree = self.settings.tree_view;
         let diff_mode = self.settings.diff_mode;
+        let show_desc = self.settings.show_descriptions;
+        let columns = &mut self.settings.columns;
         let tab = &mut self.tabs[active];
         let g = GAP;
 
@@ -417,7 +414,7 @@ impl VegitApp {
                     } else if tab.snap.commits.is_empty() && !tab.has_wip_row() {
                         ui.centered_and_justified(|ui| ui.label(RichText::new("This repository has no commits yet.").color(pal.muted)));
                     } else {
-                        ui_graph::show(ui, tab, pal, &mut acts);
+                        ui_graph::show(ui, tab, pal, columns, show_desc, &mut acts);
                     }
                 });
             });
@@ -537,6 +534,7 @@ impl VegitApp {
 
     fn dialogs(&mut self, ctx: &egui::Context, pal: &Palette) {
         let Some(mut dialog) = self.dialog.take() else { return };
+        let settings = &mut self.settings;
         let mut keep = true;
         let mut acts = Vec::new();
         let modal = egui::Modal::new(egui::Id::unique("dialog"))
@@ -545,6 +543,7 @@ impl VegitApp {
                 ui.set_width(match dialog {
                     Dialog::NewPullRequest(_) => 620.0,
                     Dialog::Access(_) => 540.0,
+                    Dialog::Settings => 700.0,
                     _ => 400.0,
                 });
                 let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -624,6 +623,7 @@ impl VegitApp {
                         }
                     }
                     Dialog::Access(form) => access_dialog(ui, form, pal, &mut acts),
+                    Dialog::Settings => settings_dialog(ui, settings, pal),
                 }
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) || ui.data(|d| d.get_temp::<bool>(egui::Id::unique("dialog_cancel"))).unwrap_or(false) {
                     keep = false;
@@ -855,6 +855,174 @@ fn pr_dialog(ui: &mut egui::Ui, form: &mut PrForm, pal: &Palette, acts: &mut Vec
         }
     });
     done
+}
+
+/// One preset as a full-width clickable row: colour swatch, name, fonts.
+fn preset_row(ui: &mut egui::Ui, t: ThemeChoice, selected: bool, pal: &Palette) -> egui::Response {
+    let tp = Palette::of(t);
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width().max(260.0), 30.0), Sense::click());
+    let p = ui.painter();
+    if selected {
+        p.rect_filled(r, CornerRadius::same(8), pal.selected);
+    } else if resp.hovered() {
+        p.rect_filled(r, CornerRadius::same(8), pal.hover);
+    }
+    let sw = Rect::from_min_size(pos2(r.left() + 8.0, r.center().y - 9.0), vec2(64.0, 18.0));
+    p.rect_filled(sw, CornerRadius::same(9), tp.canvas);
+    for (k, col) in [tp.panel, tp.accent, tp.lane(1), tp.lane(2)].iter().enumerate() {
+        p.circle_filled(pos2(sw.left() + 10.0 + k as f32 * 15.0, sw.center().y), 5.5, *col);
+    }
+    p.text(pos2(sw.right() + 12.0, r.center().y), Align2::LEFT_CENTER, t.label(), egui::FontId::proportional(13.5), pal.text);
+    p.text(pos2(r.right() - 10.0, r.center().y), Align2::RIGHT_CENTER, t.fonts().label, egui::FontId::proportional(11.0), pal.muted);
+    resp
+}
+
+/// Font picker: the preset's font, a list of installed fonts, or any font file.
+fn font_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<String>, preset_label: &str) {
+    let fonts = theme::installed_fonts();
+    let shown = match value {
+        None => format!("Preset ({preset_label})"),
+        Some(f) => fonts.iter().find(|(_, file)| file == f).map(|(n, _)| n.to_string()).unwrap_or_else(|| {
+            std::path::Path::new(f).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| f.clone())
+        }),
+    };
+    egui::ComboBox::from_id_salt(id).width(260.0).selected_text(shown).show_ui(ui, |ui| {
+        if ui.selectable_label(value.is_none(), format!("Preset ({preset_label})")).clicked() {
+            *value = None;
+        }
+        for (name, file) in fonts {
+            if ui.selectable_label(value.as_deref() == Some(file), name).clicked() {
+                *value = Some(file.to_string());
+            }
+        }
+        ui.separator();
+        if ui.button("Other font file…").clicked() {
+            if let Some(p) = rfd::FileDialog::new().add_filter("Fonts", &["ttf", "otf", "ttc"]).pick_file() {
+                *value = Some(p.display().to_string());
+            }
+        }
+    });
+}
+
+/// The settings window: appearance (preset, interface colour, fonts, branch colours)
+/// and graph options. Changes apply immediately and are saved with the window.
+fn settings_dialog(ui: &mut egui::Ui, s: &mut Settings, pal: &Palette) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Settings").size(22.0).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.add(egui::Button::new(RichText::new("✕").size(16.0).color(pal.text2())).frame(false)).on_hover_text("Close").clicked() {
+                ui.data_mut(|d| d.insert_temp(egui::Id::unique("dialog_cancel"), true));
+            }
+        });
+    });
+    ui.add_space(6.0);
+    egui::ScrollArea::vertical().max_height(620.0).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        // Appearance
+        card(pal).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("Theme preset").strong());
+            ui.label(RichText::new("The starting point; the options below adjust it.").size(12.0).color(pal.muted));
+            ui.add_space(4.0);
+            for t in ThemeChoice::ALL {
+                if preset_row(ui, t, s.theme == t, pal).clicked() {
+                    s.theme = t;
+                }
+            }
+        });
+        ui.add_space(8.0);
+        card(pal).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("Look").strong());
+            ui.add_space(4.0);
+            egui::Grid::new("look_grid").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                ui.label(RichText::new("Interface colour").color(pal.text2()));
+                ui.horizontal(|ui| {
+                    let mut custom = s.accent.is_some();
+                    if ui.checkbox(&mut custom, "Custom").changed() {
+                        s.accent = if custom { Some(pal.accent.to_array()[..3].try_into().unwrap_or([45, 140, 255])) } else { None };
+                    }
+                    if let Some(c) = s.accent.as_mut() {
+                        ui.color_edit_button_srgb(c);
+                    } else {
+                        ui.label(RichText::new("from the preset").color(pal.muted));
+                    }
+                });
+                ui.end_row();
+
+                let preset_fonts = s.theme.fonts();
+                let (ui_label, code_label) = preset_fonts.label.split_once(" · ").unwrap_or((preset_fonts.label, preset_fonts.label));
+                ui.label(RichText::new("Interface font").color(pal.text2()));
+                font_combo(ui, "ui_font", &mut s.ui_font, ui_label);
+                ui.end_row();
+                ui.label(RichText::new("Code font").color(pal.text2()));
+                font_combo(ui, "code_font", &mut s.code_font, code_label);
+                ui.end_row();
+                ui.label(RichText::new("Text size").color(pal.text2()));
+                ui.add(egui::Slider::new(&mut s.text_size, 11.0..=18.0).step_by(0.5));
+                ui.end_row();
+
+                ui.label(RichText::new("Branch colours").color(pal.text2()));
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("lane_mode").width(200.0).selected_text(s.lane_mode.label()).show_ui(ui, |ui| {
+                        for m in LaneMode::ALL {
+                            ui.selectable_value(&mut s.lane_mode, m, m.label());
+                        }
+                    });
+                    match s.lane_mode {
+                        LaneMode::Unicolor => {
+                            ui.color_edit_button_srgb(&mut s.lane_color);
+                        }
+                        LaneMode::Random => {
+                            if ui.button("Shuffle").clicked() {
+                                s.lane_seed = s.lane_seed.wrapping_mul(31).wrapping_add(17);
+                            }
+                        }
+                        _ => {}
+                    }
+                });
+                ui.end_row();
+                ui.label("");
+                // Preview of the eight lane colours as little branch lines.
+                let (r, _) = ui.allocate_exact_size(vec2(260.0, 26.0), Sense::hover());
+                let p = ui.painter();
+                for (i, c) in pal.lanes.iter().enumerate() {
+                    let x = r.left() + 12.0 + i as f32 * 30.0;
+                    p.line_segment([pos2(x, r.top() + 2.0), pos2(x, r.bottom() - 2.0)], Stroke::new(2.5, *c));
+                    p.circle_filled(pos2(x, r.center().y), 6.0, *c);
+                    p.circle_filled(pos2(x, r.center().y), 3.0, pal.card);
+                }
+                ui.end_row();
+            });
+        });
+        ui.add_space(8.0);
+        card(pal).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("History graph").strong());
+            ui.add_space(4.0);
+            ui.checkbox(&mut s.pin_head, "Keep the current branch on the left of the graph");
+            ui.checkbox(&mut s.show_descriptions, "Show commit descriptions after the summary");
+            ui.checkbox(&mut s.show_avatars, "Show profile pictures")
+                .on_hover_text("Asks Gravatar (or GitHub for GitHub addresses) with a hash of each author's e-mail.");
+            if ui.button("Reset column widths").clicked() {
+                s.columns = Settings::default().columns;
+            }
+        });
+    });
+    ui.add_space(10.0);
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if ui.add(accent_button("Done", pal)).clicked() {
+            ui.data_mut(|d| d.insert_temp(egui::Id::unique("dialog_cancel"), true));
+        }
+        if ui.button("Reset appearance").on_hover_text("Back to the preset's colours and fonts").clicked() {
+            let d = Settings::default();
+            s.accent = None;
+            s.ui_font = None;
+            s.code_font = None;
+            s.text_size = d.text_size;
+            s.lane_mode = d.lane_mode;
+        }
+    });
 }
 
 /// The "Access" window: everything needed to reach private repositories, without paying.

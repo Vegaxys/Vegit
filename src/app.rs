@@ -23,13 +23,14 @@ use crate::diff::{DiffMode, ParsedDiff};
 use crate::git::{self, Commit, DiffSource, FileChange, FileState, Snapshot};
 use crate::graph::{self, GraphLayout};
 use crate::preview;
-use crate::theme::{self, Palette, ThemeChoice};
+use crate::theme::{self, Appearance, LaneMode, Palette, ThemeChoice};
 
 pub const SETTINGS_KEY: &str = "vegit_settings";
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// Colour preset the rest of the appearance starts from.
     pub theme: ThemeChoice,
     pub recent: Vec<String>,
     pub open_tabs: Vec<String>,
@@ -37,6 +38,60 @@ pub struct Settings {
     pub tree_view: bool,
     /// Hunk, inline or split view of changes.
     pub diff_mode: DiffMode,
+    /// Interface colour replacing the preset's accent.
+    pub accent: Option<[u8; 3]>,
+    /// Font files replacing the preset's fonts (`None`: the preset's).
+    pub ui_font: Option<String>,
+    pub code_font: Option<String>,
+    pub text_size: f32,
+    pub lane_mode: LaneMode,
+    pub lane_color: [u8; 3],
+    pub lane_seed: u64,
+    /// Keep the checked-out branch on the first column of the graph.
+    pub pin_head: bool,
+    pub show_descriptions: bool,
+    /// Fetch profile pictures (Gravatar / GitHub) for commit authors.
+    pub show_avatars: bool,
+    /// Widths of the graph columns: branch/tag, graph, message, author, date, id.
+    pub columns: [f32; 6],
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            theme: ThemeChoice::default(),
+            recent: Vec::new(),
+            open_tabs: Vec::new(),
+            tree_view: false,
+            diff_mode: DiffMode::default(),
+            accent: None,
+            ui_font: None,
+            code_font: None,
+            text_size: 13.5,
+            lane_mode: LaneMode::default(),
+            lane_color: [0x2d, 0x8c, 0xff],
+            lane_seed: 7,
+            pin_head: true,
+            show_descriptions: true,
+            show_avatars: true,
+            columns: [150.0, 100.0, 220.0, 130.0, 90.0, 70.0],
+        }
+    }
+}
+
+impl Settings {
+    pub fn appearance(&self) -> Appearance {
+        Appearance {
+            theme: self.theme,
+            accent: self.accent,
+            ui_font: self.ui_font.clone(),
+            code_font: self.code_font.clone(),
+            text_size: self.text_size,
+            lanes: self.lane_mode,
+            lane_color: self.lane_color,
+            seed: self.lane_seed,
+        }
+    }
 }
 
 /// Which file list a folder belongs to, so collapsing one list leaves the others alone.
@@ -155,6 +210,10 @@ pub struct RepoTab {
     pub folded: [bool; 2],
     /// Share of the height given to the unstaged list, once the divider was dragged.
     pub wip_split: Option<f32>,
+    /// Only this author's commits stay bright in the graph.
+    pub author_filter: Option<String>,
+    /// Horizontal scroll of the graph rows, so the header can follow it.
+    pub graph_hscroll: f32,
 }
 
 impl RepoTab {
@@ -192,6 +251,8 @@ impl RepoTab {
             prs: PrState::NotLoaded,
             folded: [false, false],
             wip_split: None,
+            author_filter: None,
+            graph_hscroll: 0.0,
         }
     }
 
@@ -226,6 +287,13 @@ impl RepoTab {
         self.snap.commits.iter().find(|c| c.sha == sha)
     }
 
+    /// The repository on its hosting service (origin first), for web links.
+    pub fn web_repo(&self) -> Option<RemoteRepo> {
+        let mut urls: Vec<&(String, String)> = self.snap.remote_urls.iter().collect();
+        urls.sort_by_key(|(n, _)| n != "origin");
+        urls.iter().find_map(|(n, u)| forge::detect(n, u))
+    }
+
     /// The graph shows a "work in progress" row on top when there are local changes.
     pub fn has_wip_row(&self) -> bool {
         !self.snap.status.is_clean() || self.snap.head_sha.is_none()
@@ -255,6 +323,7 @@ pub enum Dialog {
     Confirm { title: String, body: String, confirm: String, then: Box<Action> },
     Access(AccessForm),
     NewPullRequest(PrForm),
+    Settings,
 }
 
 /// The "Create pull request" window: from a repository and branch into another.
@@ -380,7 +449,8 @@ pub enum Action {
     LoadPullRequests { interactive: bool },
     CheckoutPullRequest(usize),
     OpenUrl(String),
-    OpenPullRequestForm,
+    /// Opens the pull request window, optionally starting from a given branch.
+    OpenPullRequestForm(Option<String>),
     CreatePullRequest(PrForm),
     OpenSubmodule(String),
 }
@@ -462,7 +532,7 @@ pub struct VegitApp {
     jobs_rx: Receiver<JobDone>,
     pub actions: Vec<Action>,
     pub screenshot: Option<ScreenshotJob>,
-    applied_theme: Option<ThemeChoice>,
+    applied_theme: Option<Appearance>,
     next_token: u64,
 }
 
@@ -534,10 +604,18 @@ impl VegitApp {
                 t.picked = t.snap.status.unstaged.iter().take(2).map(|f| f.path.clone()).collect();
             }
             if std::env::var_os("VEGIT_PREVIEW_PR").is_some() {
-                app.actions.push(Action::OpenPullRequestForm);
+                app.actions.push(Action::OpenPullRequestForm(None));
             }
             if std::env::var_os("VEGIT_FOLD_STAGED").is_some() {
                 app.tabs[0].folded[1] = true;
+            }
+            if std::env::var_os("VEGIT_PREVIEW_SETTINGS").is_some() {
+                app.actions.push(Action::Dialog(Dialog::Settings));
+            }
+            if std::env::var_os("VEGIT_PREVIEW_COMMIT").is_some() {
+                if let Some(c) = app.tabs[0].snap.commits.get(1).map(|c| c.sha.clone()) {
+                    app.actions.push(Action::Select(Selection::Commit(c)));
+                }
             }
             if std::env::var_os("VEGIT_TREE").is_some() {
                 app.settings.tree_view = true;
@@ -558,7 +636,7 @@ impl VegitApp {
     }
 
     pub fn palette(&self) -> Palette {
-        Palette::of(self.settings.theme)
+        Palette::build(&self.settings.appearance())
     }
 
     pub fn tab(&mut self) -> Option<&mut RepoTab> {
@@ -572,10 +650,20 @@ impl VegitApp {
         self.tabs.iter_mut().find(|t| t.path.as_deref() == Some(path))
     }
 
+    /// Re-applies fonts and colours when an appearance setting changed, and keeps the
+    /// global switches (graph pinning, avatars) in step with the settings.
     pub fn ensure_theme(&mut self, ctx: &egui::Context) {
-        if self.applied_theme != Some(self.settings.theme) {
-            theme::apply(ctx, self.settings.theme);
-            self.applied_theme = Some(self.settings.theme);
+        let a = self.settings.appearance();
+        if self.applied_theme.as_ref() != Some(&a) {
+            theme::apply(ctx, &a);
+            self.applied_theme = Some(a);
+        }
+        crate::avatars::ENABLED.store(self.settings.show_avatars, std::sync::atomic::Ordering::Relaxed);
+        let pin = self.settings.pin_head;
+        if graph::PIN_HEAD.swap(pin, std::sync::atomic::Ordering::Relaxed) != pin {
+            for t in &mut self.tabs {
+                t.graph = graph::layout_for(&t.snap.commits, t.snap.head_sha.as_deref());
+            }
         }
     }
 
@@ -605,7 +693,7 @@ impl VegitApp {
             self.active = i;
         } else {
             let snap = demo::snapshot();
-            let layout = graph::layout(&snap.commits);
+            let layout = graph::layout_for(&snap.commits, snap.head_sha.as_deref());
             let mut tab = RepoTab::new(None);
             tab.set_snapshot(snap, layout);
             tab.prs = demo::pull_requests();
@@ -1221,7 +1309,7 @@ impl VegitApp {
                     self.queue_git(ctx, ok, args, None, OpKind::Plain);
                 }
             }
-            Action::OpenPullRequestForm => {
+            Action::OpenPullRequestForm(from_branch) => {
                 let Some(tab) = self.tab() else { return };
                 let remotes = match (&tab.path, &tab.prs) {
                     (Some(p), _) => forge::remotes_of(p),
@@ -1256,6 +1344,10 @@ impl VegitApp {
                     current,
                 };
                 form.select_forge(forge_kind);
+                if let Some(b) = from_branch {
+                    form.from_branch = b;
+                    form.to_branch = form.default_target();
+                }
                 self.dialog = Some(Dialog::NewPullRequest(form));
             }
             Action::CreatePullRequest(form) => {
@@ -1608,7 +1700,7 @@ fn run_task(task: Task) -> JobDone {
         Task::Reload { repo } => {
             let result = git::load_snapshot(&repo)
                 .map(|snap| {
-                    let layout = graph::layout(&snap.commits);
+                    let layout = graph::layout_for(&snap.commits, snap.head_sha.as_deref());
                     (snap, layout)
                 })
                 .map_err(|e| e.0);

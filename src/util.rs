@@ -6,8 +6,16 @@ use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Pos2, Sense, pos
 use crate::git::{FileChange, FileState};
 use crate::theme::Palette;
 
-/// Round avatar with initials; the colour is stable per e-mail address.
+/// Round avatar: the author's profile picture when it is available, otherwise initials
+/// on a colour that stays the same for each e-mail address.
 pub fn avatar(p: &egui::Painter, c: Pos2, r: f32, name: &str, email: &str) {
+    if let Some(tex) = crate::avatars::texture(p.ctx(), email) {
+        let rect = egui::Rect::from_center_size(c, vec2(r * 2.0, r * 2.0));
+        let uv = egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        // A rounded rectangle as wide as it is round is a circle: the picture gets clipped to it.
+        p.add(egui::epaint::RectShape::filled(rect, CornerRadius::same(r.round() as u8), Color32::WHITE).with_texture(tex, uv));
+        return;
+    }
     let hash = email.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ u32::from(b));
     let hue = (hash % 360) as f32 / 360.0;
     let fill: Color32 = egui::ecolor::Hsva::new(hue, 0.45, 0.78, 1.0).into();

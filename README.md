@@ -8,8 +8,12 @@ hooks, config and SSH keys behave exactly as they do in a terminal.
 
 ## Features
 
-- **Commit graph**: branches, tags, remotes and merges laid out in stable lanes, with commit search.
-  Loads the last 3,000 commits so refreshes stay quick.
+- **Commit graph**: branches, tags, remotes, merges and stashes laid out in stable lanes, with commit search.
+  Columns can be resized, the current branch is pinned to the left, and clicking "Author" filters commits
+  by author. Loads the last 3,000 commits so refreshes stay quick.
+- **Right-click menu** on any commit: push, pull, merge or rebase into the local branch, start a pull request,
+  rename or delete a branch, and copy the SHA, commit link, branch link or branch name.
+  Double-click a branch label to check it out.
 - **Staging**: stage, unstage or discard files one by one, in bulk or by folder (path or tree view),
   and stage or unstage single hunks.
 - **Diffs**: unified or split view, virtualized so huge diffs (Unity scenes, big asset imports) stay smooth.
@@ -23,13 +27,23 @@ hooks, config and SSH keys behave exactly as they do in a terminal.
 - **Private repositories**: sign in with a token saved through git's credential helper
   (Git Credential Manager on Windows), or generate an SSH key. The app never stores secrets itself.
 - **Tabs** for several repositories, clone / init / open, submodules, "open in terminal / file explorer".
-- **Themes**: Midnight, Dracula, Monokai, Nord, Dusk, Paper (light) and Solarized (light).
+- **Sidebar**: branches grouped into folders (`feature/…`), with merge and rebase actions.
+- **Appearance settings**: theme presets (Midnight, Dracula, Monokai, Nord, Dusk, Paper and Solarized light),
+  interface color, UI and code fonts (including a custom font file), text size, and branch colors
+  (theme, gradient, rainbow, random or a single color).
+- **Author pictures** from GitHub (for `users.noreply.github.com` addresses) or Gravatar, with initials as
+  a fallback. This sends a hash of each author e-mail to those services, so it can be turned off in the settings.
 - **Non-blocking UI**: git runs on a worker thread and network operations on their own threads,
   so the window never freezes.
 
 A read-only sample project is built in, so the first screen shows a realistic graph before you open anything.
 
-## Requirements
+## Download
+
+A prebuilt Windows executable is attached to each [release](https://github.com/Vegaxys/Vegit/releases).
+It only needs [Git](https://git-scm.com/) on your `PATH`.
+
+## Requirements (building from source)
 
 - [Git](https://git-scm.com/) on your `PATH`.
 - [Rust](https://rustup.rs/) 1.85 or newer (the crate uses the 2024 edition).

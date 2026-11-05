@@ -279,6 +279,32 @@ pub fn list(dir: &Path, interactive: bool) -> Result<(RemoteRepo, Vec<PullReques
     Ok((repo, prs))
 }
 
+/// Web page of a commit on the hosting service.
+pub fn commit_url(repo: &RemoteRepo, sha: &str) -> String {
+    match repo.forge {
+        Forge::GitHub => format!("https://{}/{}/commit/{sha}", repo.host, repo.path),
+        Forge::GitLab => format!("https://{}/{}/-/commit/{sha}", repo.host, repo.path),
+        Forge::Bitbucket => format!("https://bitbucket.org/{}/commits/{sha}", repo.path),
+        Forge::Azure => {
+            let (op, name) = repo.path.rsplit_once('/').unwrap_or((&repo.path, ""));
+            format!("https://dev.azure.com/{op}/_git/{name}/commit/{sha}")
+        }
+    }
+}
+
+/// Web page of a branch on the hosting service.
+pub fn branch_url(repo: &RemoteRepo, branch: &str) -> String {
+    match repo.forge {
+        Forge::GitHub => format!("https://{}/{}/tree/{branch}", repo.host, repo.path),
+        Forge::GitLab => format!("https://{}/{}/-/tree/{branch}", repo.host, repo.path),
+        Forge::Bitbucket => format!("https://bitbucket.org/{}/branch/{branch}", repo.path),
+        Forge::Azure => {
+            let (op, name) = repo.path.rsplit_once('/').unwrap_or((&repo.path, ""));
+            format!("https://dev.azure.com/{op}/_git/{name}?version=GB{branch}")
+        }
+    }
+}
+
 /// Every remote of `dir` that is on a supported service, `origin` first.
 pub fn remotes_of(dir: &Path) -> Vec<RemoteRepo> {
     let names = git::run(dir, &["remote"]).unwrap_or_default();

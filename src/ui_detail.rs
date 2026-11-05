@@ -75,7 +75,17 @@ fn wip(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, acts: &m
                 let n = tab.snap.status.unstaged.len() + tab.snap.status.staged.len();
                 ui.label(RichText::new(format!("{n} file change{}", if n == 1 { "" } else { "s" })).strong().size(15.0));
                 if let Some(b) = &tab.snap.head_branch {
-                    ui.label(RichText::new(format!("on {b}")).color(pal.text2()));
+                    ui.label(RichText::new("on").color(pal.text2()));
+                    // Branch in a pill; a long name ends with "…" instead of pushing things out.
+                    let max_w = (ui.available_width() - 120.0).max(40.0);
+                    egui::Frame::new()
+                        .fill(pal.accent.gamma_multiply(0.2))
+                        .corner_radius(CornerRadius::same(10))
+                        .inner_margin(egui::Margin::symmetric(8, 2))
+                        .show(ui, |ui| {
+                            ui.set_max_width(max_w);
+                            ui.add(egui::Label::new(RichText::new(b).color(pal.accent)).truncate()).on_hover_text(b);
+                        });
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| view_switch(ui, pal, tree, acts));
             });
@@ -205,6 +215,8 @@ fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool,
         Side::Unstaged => "unstaged_list",
         Side::Staged => "staged_list",
     };
+    // show_rows sizes rows with the current item spacing: zero it first, or rows drift and the list ends early.
+    ui.spacing_mut().item_spacing.y = 0.0;
     egui::ScrollArea::vertical().id_salt(id).auto_shrink([false, false]).show_rows(ui, FILE_ROW_H, entries.len(), |ui, range| {
         ui.spacing_mut().item_spacing.y = 0.0;
         for (pos, e) in entries.iter().enumerate().skip(range.start).take(range.len()) {
@@ -473,13 +485,19 @@ fn commit(ui: &mut egui::Ui, tab: &mut RepoTab, sha: &str, pal: &Palette, tree: 
         .show(ui, |ui| {
             card(pal).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("commit {}", git::short(sha))).monospace().color(pal.muted));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("Copy id").clicked() {
-                            acts.push(Action::Copy(sha.to_string()));
-                        }
-                    });
+                // Click "commit 1a2b3c4" to copy its full SHA or its short id.
+                let title = ui
+                    .add(egui::Label::new(RichText::new(format!("commit {}  ▾", git::short(sha))).monospace().color(pal.muted)).sense(Sense::click()))
+                    .on_hover_text("Click to copy");
+                egui::Popup::menu(&title).show(|ui| {
+                    if ui.button(format!("Copy SHA  ({}…)", &sha[..sha.len().min(12)])).clicked() {
+                        acts.push(Action::Copy(sha.to_string()));
+                        ui.close();
+                    }
+                    if ui.button(format!("Copy id  ({})", git::short(sha))).clicked() {
+                        acts.push(Action::Copy(git::short(sha).to_string()));
+                        ui.close();
+                    }
                 });
                 let mut lines = detail.message.lines();
                 let title = lines.next().unwrap_or_default();
@@ -527,6 +545,8 @@ fn commit(ui: &mut egui::Ui, tab: &mut RepoTab, sha: &str, pal: &Palette, tree: 
     let open = tab.diff.as_ref().map(|d| (d.source.clone(), d.file.path.clone()));
     let files = &detail.files;
     let entries = filelist::flatten(files, tree, &tab.collapsed[ListId::Commit as usize]);
+    // show_rows sizes rows with the current item spacing: zero it first, or rows drift and the list ends early.
+    ui.spacing_mut().item_spacing.y = 0.0;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, FILE_ROW_H, entries.len(), |ui, range| {
         ui.spacing_mut().item_spacing.y = 0.0;
         for e in &entries[range] {
@@ -675,6 +695,8 @@ pub fn diff_view(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, mode: Diff
     if let Some(row) = jump {
         scroll = scroll.vertical_scroll_offset(row as f32 * DIFF_ROW_H);
     }
+    // show_rows sizes rows with the current item spacing: zero it first, or rows drift and the list ends early.
+    ui.spacing_mut().item_spacing.y = 0.0;
     let top = match mode {
         DiffMode::Split => {
             scroll = egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("diff_split");
@@ -824,6 +846,8 @@ pub fn file_view(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, mode: Diff
                 .frame(egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 10, top: 0, bottom: 0 }))
                 .show(ui, |ui| {
                     ui.label(RichText::new(format!("{} commits", entries.len())).color(pal.muted).size(12.0));
+                    // show_rows sizes rows with the current item spacing: zero it first, or rows drift and the list ends early.
+                    ui.spacing_mut().item_spacing.y = 0.0;
                     egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("history_rows").show_rows(ui, HISTORY_ROW_H, entries.len(), |ui, range| {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         for i in range {
@@ -860,6 +884,8 @@ pub fn file_view(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, mode: Diff
                 }
                 Some(Ok(v)) => v,
             };
+            // show_rows sizes rows with the current item spacing: zero it first, or rows drift and the list ends early.
+            ui.spacing_mut().item_spacing.y = 0.0;
             egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("blame_rows").show_rows(ui, BLAME_ROW_H, lines.len(), |ui, range| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let w = ui.available_width();

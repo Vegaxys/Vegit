@@ -16,6 +16,7 @@ pub enum Icon {
     Terminal,
     Folder,
     Refresh,
+    Gear,
 }
 
 pub fn paint(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
@@ -80,6 +81,15 @@ pub fn paint(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             p.line_segment([at(-0.7, -0.5), at(-0.2, 0.0)], s);
             p.line_segment([at(-0.2, 0.0), at(-0.7, 0.5)], s);
             p.line_segment([at(0.0, 0.6), at(0.7, 0.6)], s);
+        }
+        Icon::Gear => {
+            for k in 0..8 {
+                let a = k as f32 * std::f32::consts::FRAC_PI_4;
+                let d = vec2(a.cos(), a.sin());
+                p.line_segment([c + d * r * 0.55, c + d * r * 0.9], Stroke::new(2.2, color));
+            }
+            p.circle_stroke(c, r * 0.55, s);
+            p.circle_stroke(c, r * 0.2, s);
         }
         Icon::Folder => {
             let pts = vec![at(-0.8, -0.6), at(-0.2, -0.6), at(0.0, -0.4), at(0.8, -0.4), at(0.8, 0.7), at(-0.8, 0.7), at(-0.8, -0.6)];

@@ -53,7 +53,7 @@ fn snapshot_reads_history_branches_and_status() {
     assert!(snap.status.unstaged.iter().any(|f| f.path == "a.txt" && f.state == FileState::Modified));
     assert!(snap.status.unstaged.iter().any(|f| f.path == "new.txt" && f.state == FileState::Untracked));
 
-    let layout = graph::layout(&snap.commits);
+    let layout = graph::layout_for(&snap.commits, snap.head_sha.as_deref());
     assert_eq!(layout.rows.len(), 4);
     assert_eq!(layout.rows[0].col, 0);
     assert!(layout.width >= 2);
@@ -94,7 +94,7 @@ fn single_hunk_can_be_staged_and_unstaged() {
 #[test]
 fn sample_graph_keeps_main_line_in_first_column() {
     let snap = crate::demo::snapshot();
-    let layout = graph::layout(&snap.commits);
+    let layout = graph::layout_for(&snap.commits, snap.head_sha.as_deref());
     // "Initial commit" sits on the first lane, with the same colour as the newest commit.
     let last = layout.rows.last().unwrap();
     assert_eq!(last.col, 0);

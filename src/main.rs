@@ -7,6 +7,7 @@
 
 mod access;
 mod app;
+mod avatars;
 mod demo;
 mod diff;
 mod filelist;
