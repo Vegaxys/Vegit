@@ -360,11 +360,14 @@ pub fn run_recorded(dir: &Path, steps: &[Step], what: Option<(String, ResetMode)
         return (run_steps(dir, steps, &mut Vec::new(), false), None);
     };
     let before = ref_state(dir);
+    let was_pending = git::pending_op(dir).is_some();
     let mut backups = Vec::new();
     let result = run_steps(dir, steps, &mut backups, true);
     // A failure leaves either nothing changed or an operation in progress (a conflict),
-    // which the banner's Abort takes back better than a ref reset would.
-    if result.is_err() {
+    // which the banner's Abort takes back better than a ref reset would. The same goes for
+    // an action that stops midway on purpose (a history edit stopping on a commit): git
+    // refuses to switch branches until it is finished or aborted.
+    if result.is_err() || (!was_pending && git::pending_op(dir).is_some()) {
         return (result, None);
     }
     let after = ref_state(dir);

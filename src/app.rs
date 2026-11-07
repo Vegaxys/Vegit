@@ -677,6 +677,8 @@ enum JobDone {
     Conflict { tab_path: PathBuf, path: String, result: Result<(Vec<crate::conflict::Segment>, (String, String)), String> },
     Locks { tab_path: PathBuf, result: Result<Vec<crate::lfs::Lock>, String> },
     WorktreeAdded { repo: PathBuf, path: PathBuf, result: Result<(), String>, open_tab: bool },
+    /// Files changed by the commits a push just sent (for the Unlock offer).
+    PushedFiles { tab_path: PathBuf, files: Vec<String> },
 }
 
 pub struct HomeForm {
@@ -1310,6 +1312,7 @@ impl VegitApp {
                     }
                 }
                 JobDone::WorktreeAdded { repo, path, result, open_tab } => self.on_worktree_added(ctx, repo, path, result, open_tab),
+                JobDone::PushedFiles { tab_path, files } => self.on_pushed_files(ctx, &tab_path, files),
                 JobDone::RemoteChecked { url, result } => self.on_remote_checked(url, result),
                 JobDone::RemoteTags { tab_path, remote, result } => {
                     // A failure (offline, no access) just leaves the badges off.

@@ -841,3 +841,54 @@ fn lfs_tracking_locks_and_sizes() {
     assert!(!info.unity);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The Unlock offer after a push only names files the push carried: on the first push of a
+/// branch (no earlier position on the server), on a later one, and nothing when the push sent
+/// nothing (the last update of the remote branch was a fetch).
+#[test]
+fn pushed_files_are_the_ones_the_push_sent() {
+    let (dir, server) = repo_and_server("pushedfiles");
+    let url = server.display().to_string().replace('\\', "/");
+    g(&dir, &["remote", "add", "origin", &url]);
+    g(&dir, &["push", "-q", "-u", "origin", "main"]);
+    g(&dir, &["switch", "-q", "-c", "art"]);
+    write(&dir, "hero.psd", "v1\n");
+    g(&dir, &["add", "."]);
+    g(&dir, &["commit", "-q", "-m", "hero"]);
+    g(&dir, &["push", "-q", "-u", "origin", "art"]);
+    assert_eq!(git::pushed_files(&dir), ["hero.psd"], "first push of the branch: only its own commits");
+
+    write(&dir, "hero.psd", "v2\n");
+    write(&dir, "b.txt", "b\n");
+    g(&dir, &["add", "."]);
+    g(&dir, &["commit", "-q", "-m", "more"]);
+    g(&dir, &["push", "-q"]);
+    assert_eq!(git::pushed_files(&dir), ["b.txt", "hero.psd"]);
+
+    g(&dir, &["fetch", "-q", "origin", "+art:refs/remotes/origin/art"]);
+    g(&dir, &["update-ref", "-m", "fetch: forced", "refs/remotes/origin/art", "HEAD~1"]);
+    assert!(git::pushed_files(&dir).is_empty(), "the last update wasn't a push");
+    cleanup(&[&dir, &server]);
+}
+
+/// A history edit that stops on a commit leaves a rebase in progress: no Undo is recorded
+/// (git would refuse to switch back), the banner's Abort takes it back.
+#[test]
+fn an_edit_that_stops_midway_records_no_undo() {
+    let dir = repo_four_commits("stopmidway");
+    let (_, plan) = rewrite::single_plan(&dir, &sha_of(&dir, "c3"), Change::Edit, "").unwrap();
+    let steps = rewrite::plan_steps(&dir, &plan, &cp_editor).unwrap();
+    let (result, entry) = safety::run_recorded(&dir, &steps, Some(("rebase".into(), ResetMode::Keep)));
+    result.unwrap();
+    assert_eq!(git::pending_op(&dir), Some(git::PendingOp::Rebase));
+    assert!(entry.is_none());
+
+    // Actions made while it is stopped are still recorded.
+    write(&dir, "c.txt", "changed\n");
+    let a: Vec<String> = ["commit", "-q", "-am", "while stopped"].iter().map(|s| s.to_string()).collect();
+    let (result, entry) = safety::run_recorded(&dir, &[Step::Git(a.clone())], safety::describe(&a));
+    result.unwrap();
+    assert!(entry.is_some());
+    g(&dir, &["rebase", "--abort"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

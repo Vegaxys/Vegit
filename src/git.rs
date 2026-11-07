@@ -204,12 +204,10 @@ fn base_command(dir: &Path) -> Command {
     // Background status polls must never grab index.lock and make a stage/commit fail.
     cmd.env("GIT_OPTIONAL_LOCKS", "0");
     // Conflicts written by Vegit's own merges and rebases carry the original version too
-    // ("Show the original" in the conflict cards). Needs git 2.35.
-    if zdiff3_supported() {
-        cmd.env("GIT_CONFIG_COUNT", "1");
-        cmd.env("GIT_CONFIG_KEY_0", "merge.conflictStyle");
-        cmd.env("GIT_CONFIG_VALUE_0", "zdiff3");
-    }
+    // ("Show the original" in the conflict cards).
+    cmd.env("GIT_CONFIG_COUNT", "1");
+    cmd.env("GIT_CONFIG_KEY_0", "merge.conflictStyle");
+    cmd.env("GIT_CONFIG_VALUE_0", conflict_style());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -217,6 +215,12 @@ fn base_command(dir: &Path) -> Command {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
+}
+
+/// The conflict style that keeps the original version: `zdiff3` (trims the lines both sides
+/// share) from git 2.35, else `diff3`, which every git version knows.
+pub fn conflict_style() -> &'static str {
+    if zdiff3_supported() { "zdiff3" } else { "diff3" }
 }
 
 /// git 2.35 or newer (zdiff3 conflict style), checked once.
@@ -413,7 +417,18 @@ pub fn load_snapshot(dir: &Path) -> GitResult<Snapshot> {
     }
     let changed: Vec<String> = snap.status.unstaged.iter().chain(&snap.status.staged).map(|f| f.path.clone()).collect();
     snap.lfs = crate::lfs::info(dir, &changed);
-    snap.pending = if git_dir.join("MERGE_HEAD").exists() {
+    snap.pending = pending_in(&git_dir);
+    Ok(snap)
+}
+
+/// The operation stopped midway in the repository at `dir`, if any.
+pub fn pending_op(dir: &Path) -> Option<PendingOp> {
+    let git_dir = PathBuf::from(run(dir, &["rev-parse", "--absolute-git-dir"]).ok()?.trim());
+    pending_in(&git_dir)
+}
+
+fn pending_in(git_dir: &Path) -> Option<PendingOp> {
+    if git_dir.join("MERGE_HEAD").exists() {
         Some(PendingOp::Merge)
     } else if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
         Some(PendingOp::Rebase)
@@ -423,8 +438,7 @@ pub fn load_snapshot(dir: &Path) -> GitResult<Snapshot> {
         Some(PendingOp::Revert)
     } else {
         None
-    };
-    Ok(snap)
+    }
 }
 
 fn load_commits(dir: &Path) -> GitResult<Vec<Commit>> {
@@ -872,6 +886,34 @@ pub fn delete_remote_tag_args(remote: &str, tag: &str) -> Vec<String> {
 /// Tags reachable from `rev` (what pushing `rev` makes "pushed" on the server).
 pub fn tags_reachable(dir: &Path, rev: &str) -> GitResult<Vec<String>> {
     Ok(run(dir, &["tag", "--merged", rev])?.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect())
+}
+
+/// Files changed by the commits the last push of the current branch sent, read from the
+/// reflog of the remote branch it pushes to. Empty when the last update of that remote
+/// branch wasn't a push (nothing was sent) or it can't be told.
+pub fn pushed_files(dir: &Path) -> Vec<String> {
+    let target = run(dir, &["rev-parse", "--symbolic-full-name", "@{push}"])
+        .or_else(|_| run(dir, &["rev-parse", "--symbolic-full-name", "@{upstream}"]))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if !target.starts_with("refs/remotes/") {
+        return Vec::new();
+    }
+    let last = run(dir, &["reflog", "-1", "--format=%gs", &target]).unwrap_or_default();
+    if !last.trim().starts_with("update by push") {
+        return Vec::new();
+    }
+    // Where it was before the push; a branch the push created has no earlier entry, so its
+    // new commits are the ones no other remote branch has.
+    let out = run(dir, &["-c", "core.quotePath=false", "diff", "--name-only", &format!("{target}@{{1}}"), &target]).or_else(|_| {
+        // `--exclude` before `--remotes` takes the name without `refs/remotes/`.
+        let exclude = format!("--exclude={}", &target["refs/remotes/".len()..]);
+        run(dir, &["-c", "core.quotePath=false", "log", "--format=", "--name-only", &target, "--not", &exclude, "--remotes"])
+    });
+    let mut files: Vec<String> = out.unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
+    files.sort();
+    files.dedup();
+    files
 }
 
 /// `git branch --set-upstream-to=<remote_branch> <local>`.

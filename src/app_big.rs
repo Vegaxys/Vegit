@@ -183,7 +183,8 @@ impl VegitApp {
             }
             Action::RecreateConflict(path) => {
                 let Some(repo) = self.active_path() else { return self.sample_refusal(ctx) };
-                let steps = vec![Step::Backup(vec![path.clone()]), git_step(&["checkout", "--conflict=zdiff3", "--", &path])];
+                let style = format!("--conflict={}", git::conflict_style());
+                let steps = vec![Step::Backup(vec![path.clone()]), git_step(&["checkout", &style, "--", &path])];
                 self.send(Task::Steps { repo, label: "Show the original".into(), ok_text: None, steps, what: Some(("show the original".into(), ResetMode::Keep)), kind: OpKind::Plain, role: Role::New });
                 self.open_conflict(path);
             }
@@ -338,12 +339,32 @@ impl VegitApp {
         });
     }
 
-    /// After a push: my locked files with no change left were just pushed: offer to unlock.
-    pub(super) fn offer_unlock(&mut self, ctx: &egui::Context, tab_path: &PathBuf) {
-        let Some(t) = self.tab_by_path(tab_path) else { return };
-        let Some(Ok(locks)) = &t.lfs_locks else { return };
+    /// My locked files with no local change left: after a push, the ones it carried can be unlocked.
+    fn unlock_candidates(&mut self, tab_path: &PathBuf) -> Vec<String> {
+        let Some(t) = self.tab_by_path(tab_path) else { return Vec::new() };
+        let Some(Ok(locks)) = &t.lfs_locks else { return Vec::new() };
         let changed: std::collections::HashSet<&str> = t.snap.status.unstaged.iter().chain(&t.snap.status.staged).map(|f| f.path.as_str()).collect();
-        let done: Vec<String> = locks.iter().filter(|l| l.mine && !changed.contains(l.path.as_str())).map(|l| l.path.clone()).collect();
+        locks.iter().filter(|l| l.mine && !changed.contains(l.path.as_str())).map(|l| l.path.clone()).collect()
+    }
+
+    /// After a push: reads which files it carried (network-free, but off the UI thread), so
+    /// a file locked and never touched isn't offered for unlocking.
+    pub(super) fn offer_unlock(&mut self, ctx: &egui::Context, tab_path: &PathBuf) {
+        if self.unlock_candidates(tab_path).is_empty() {
+            return;
+        }
+        let tx = self.jobs_tx.clone();
+        let ctx2 = ctx.clone();
+        let repo = tab_path.clone();
+        std::thread::spawn(move || {
+            let files = git::pushed_files(&repo);
+            let _ = tx.send(JobDone::PushedFiles { tab_path: repo, files });
+            ctx2.request_repaint();
+        });
+    }
+
+    pub(super) fn on_pushed_files(&mut self, ctx: &egui::Context, tab_path: &PathBuf, files: Vec<String>) {
+        let done: Vec<String> = self.unlock_candidates(tab_path).into_iter().filter(|p| files.contains(p)).collect();
         if let [one] = done.as_slice() {
             self.toast_offer(ctx, format!("{one} is pushed and still locked by you."), ToastKind::Info, "Unlock it", Action::LfsUnlock { path: one.clone(), force: false });
         }
