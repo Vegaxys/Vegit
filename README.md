@@ -4,15 +4,7 @@ A fast, friendly desktop Git client written in Rust with [egui](https://github.c
 No AI features, no account, no subscription: it drives your own `git` install, so credentials,
 hooks, config and SSH keys behave exactly as they do in a terminal.
 
-<p align="center">
-  <a href="docs/vegit-presentation.mp4"><img src="docs/vegit-presentation.jpg" width="820"
-    alt="Vegit in 30 seconds: commit graph, themes and backgrounds, tree or list view, staging, pull requests and merge conflicts"></a>
-  <br>
-  <sub><a href="docs/vegit-presentation.mp4">Watch the 30-second tour</a> (MP4 with sound): the commit graph, themes and
-  backgrounds, tree or list view, staging and committing, pull requests and merge conflicts.</sub>
-</p>
-
-![Commit graph, branch sidebar and staging panel](shots/vegit.png)
+[![Vegit – A Fast, Friendly Desktop Git Client](https://img.youtube.com/vi/QB5GjLwnyeY/maxresdefault.jpg)](https://youtu.be/QB5GjLwnyeY)
 
 ## Features
 
