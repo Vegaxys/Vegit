@@ -1138,7 +1138,8 @@ fn signatures_maintenance_and_commit_options() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A submodule added, updated, synced and removed in one action.
+/// A submodule added, updated, synced and removed in one action. With nothing unsaved,
+/// git's copy goes too; with a commit no server has, the risk is reported and the copy kept.
 #[test]
 fn submodules_are_added_and_removed() {
     let lib = repo_one_commit("sublib");
@@ -1147,10 +1148,71 @@ fn submodules_are_added_and_removed() {
     g(&dir, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", &url, "libs/lib"]);
     g(&dir, &["commit", "-q", "-m", "add lib"]);
     run_args(&dir, extras::submodule_sync_args("libs/lib"));
-    let (result, _) = safety::run_recorded(&dir, &extras::submodule_remove_steps(&dir, "libs/lib"), None);
+    let risks = extras::submodule_risks(&dir, "libs/lib");
+    assert_eq!(risks, extras::SubmoduleRisks::default(), "a fresh submodule has nothing unsaved");
+    let (result, _) = safety::run_recorded(&dir, &extras::submodule_remove_steps(&dir, "libs/lib", risks.keep_git_data()), None);
     result.unwrap();
     assert!(!dir.join("libs/lib").exists());
     assert!(!dir.join(".git/modules/libs/lib").exists());
     assert!(g(&dir, &["diff", "--cached", "--name-only"]).contains(".gitmodules"));
+    g(&dir, &["commit", "-q", "-m", "remove lib"]);
+
+    g(&dir, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", &url, "libs/other"]);
+    let sub = dir.join("libs/other");
+    g(&sub, &["config", "user.name", "Test User"]);
+    g(&sub, &["config", "user.email", "test@example.com"]);
+    write(&sub, "local.txt", "only here\n");
+    g(&sub, &["add", "."]);
+    g(&sub, &["commit", "-q", "-m", "not pushed"]);
+    write(&sub, "wip.txt", "uncommitted\n");
+    let risks = extras::submodule_risks(&dir, "libs/other");
+    assert_eq!((risks.changes, risks.unpushed, risks.stashes), (1, 1, 0));
+    assert!(risks.keep_git_data());
+    let (result, _) = safety::run_recorded(&dir, &extras::submodule_remove_steps(&dir, "libs/other", risks.keep_git_data()), None);
+    result.unwrap();
+    assert!(!sub.exists());
+    let kept = format!("--git-dir={}", dir.join(".git/modules/libs/other").display());
+    assert_eq!(g(&dir, &[&kept, "log", "-1", "--format=%s", "HEAD"]).trim(), "not pushed", "the commit can still be recovered");
     cleanup(&[&lib, &dir]);
+}
+
+/// A patch applied with `am` that stops on a conflict reads as a patch, so the banner's
+/// Abort runs `am --abort` (git refuses `rebase --abort` there).
+#[test]
+fn a_stopped_patch_is_not_taken_for_a_rebase() {
+    let dir = repo_four_commits("amstop");
+    let c4 = sha_of(&dir, "c4");
+    let file = dir.join("c4.patch");
+    std::fs::write(&file, extras::format_patch(&dir, &[c4]).unwrap()).unwrap();
+    g(&dir, &["reset", "-q", "--hard", "HEAD~1"]);
+    write(&dir, "d.txt", "different\n");
+    g(&dir, &["add", "."]);
+    g(&dir, &["commit", "-q", "-m", "other d"]);
+    let refs: Vec<String> = extras::patch_apply_args(&file);
+    let args: Vec<&str> = refs.iter().map(String::as_str).collect();
+    assert!(git::run(&dir, &args).is_err(), "the patch conflicts");
+    let op = git::pending_op(&dir).unwrap();
+    assert_eq!(op, git::PendingOp::Am);
+    g(&dir, &[op.command(), "--abort"]);
+    assert_eq!(git::pending_op(&dir), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// "Delete all new files" deletes only the files it saved: one created after the list was
+/// read stays, and the folders left empty go.
+#[test]
+fn deleting_new_files_spares_files_created_since() {
+    let dir = repo_four_commits("cleanrace");
+    std::fs::create_dir_all(dir.join("gen/deep")).unwrap();
+    write(&dir, "gen/deep/a.tmp", "a");
+    write(&dir, "b.tmp", "b");
+    let listed = vec!["gen/deep/a.tmp".to_string(), "b.tmp".to_string()];
+    write(&dir, "late.tmp", "created after the list was read");
+    let (result, entry) = safety::run_recorded(&dir, &extras::clean_steps(&listed), Some(("delete new files".into(), ResetMode::Keep)));
+    result.unwrap();
+    assert!(dir.join("late.tmp").exists(), "not in the list, not saved: not deleted");
+    assert!(!dir.join("b.tmp").exists() && !dir.join("gen").exists(), "listed files and their empty folders are gone");
+    undo(&dir, &entry.unwrap());
+    assert_eq!(std::fs::read_to_string(dir.join("gen/deep/a.tmp")).unwrap(), "a");
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -299,14 +299,55 @@ pub fn submodule_sync_args(path: &str) -> Vec<String> {
     vec!["submodule".into(), "sync".into(), "--".into(), path.into()]
 }
 
-/// The three steps git requires to remove a submodule, as one action.
-pub fn submodule_remove_steps(dir: &Path, path: &str) -> Vec<Step> {
+/// What removing a submodule would lose: files changed in its folder, and what lives only
+/// in git's copy of it under `.git/modules` (commits no remote has, stashes).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SubmoduleRisks {
+    pub changes: usize,
+    pub unpushed: usize,
+    pub stashes: usize,
+}
+
+impl SubmoduleRisks {
+    /// Git's copy holds work found nowhere else: it is kept, so the work can be recovered.
+    pub fn keep_git_data(&self) -> bool {
+        self.unpushed > 0 || self.stashes > 0
+    }
+}
+
+fn submodule_git_dir(dir: &Path, path: &str) -> PathBuf {
     let git_dir = git::run(dir, &["rev-parse", "--absolute-git-dir"]).map(|s| PathBuf::from(s.trim())).unwrap_or_else(|_| dir.join(".git"));
-    vec![
+    git_dir.join("modules").join(path)
+}
+
+pub fn submodule_risks(dir: &Path, path: &str) -> SubmoduleRisks {
+    let lines = |out: GitResult<String>| out.map(|o| o.lines().filter(|l| !l.trim().is_empty()).count()).unwrap_or(0);
+    let folder = dir.join(path);
+    let changes = if folder.join(".git").exists() { lines(git::run(&folder, &["status", "--porcelain", "-uall"])) } else { 0 };
+    // Read through git's copy, which also exists when the folder was never checked out.
+    let data = submodule_git_dir(dir, path);
+    if !data.exists() {
+        return SubmoduleRisks { changes, ..Default::default() };
+    }
+    let gd = format!("--git-dir={}", data.display());
+    SubmoduleRisks {
+        changes,
+        unpushed: lines(git::run(dir, &[&gd, "rev-list", "HEAD", "--branches", "--not", "--remotes"])),
+        stashes: lines(git::run(dir, &[&gd, "stash", "list"])),
+    }
+}
+
+/// The three steps git requires to remove a submodule, as one action. Git's copy of it is
+/// deleted too, unless `keep_git_data` (it holds unpushed commits or stashes).
+pub fn submodule_remove_steps(dir: &Path, path: &str, keep_git_data: bool) -> Vec<Step> {
+    let mut steps = vec![
         Step::Git(vec!["submodule".into(), "deinit".into(), "-f".into(), "--".into(), path.into()]),
         Step::Git(vec!["rm".into(), "-f".into(), "-q".into(), "--".into(), path.into()]),
-        Step::DeleteDir(git_dir.join("modules").join(path)),
-    ]
+    ];
+    if !keep_git_data {
+        steps.push(Step::DeleteDir(submodule_git_dir(dir, path)));
+    }
+    steps
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -344,9 +385,13 @@ pub fn is_shallow(dir: &Path) -> bool {
 // Cleanup (doc: "Delete all new files")
 // ---------------------------------------------------------------------------------------------
 
-/// Deleting every new file: saved first (Undo), then `clean`.
+/// Deleting the new files: saved first (Undo), then deleted one by one rather than with
+/// `clean`, which would also take a file created since the list was read, unsaved.
 pub fn clean_steps(untracked: &[String]) -> Vec<Step> {
-    vec![Step::Backup(untracked.to_vec()), Step::Git(vec!["clean".into(), "-f".into(), "-d".into(), "-q".into()])]
+    let mut steps = vec![Step::Backup(untracked.to_vec())];
+    steps.extend(untracked.iter().cloned().map(Step::Delete));
+    steps.push(Step::PruneEmptyDirs(untracked.to_vec()));
+    steps
 }
 
 /// Ignored files and folders `clean -X` would delete, with the space they take.

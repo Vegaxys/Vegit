@@ -202,7 +202,12 @@ impl VegitApp {
             Action::SubmoduleSync(path) => self.queue_git(ctx, Some(format!("URL of {path} synced")), extras::submodule_sync_args(&path), None, OpKind::Plain),
             Action::SubmoduleRemove(path) => {
                 let Some(repo) = self.active_path() else { return self.sample_refusal(ctx) };
-                let steps = extras::submodule_remove_steps(&repo, &path);
+                let risks = extras::submodule_risks(&repo, &path);
+                self.dialog = Some(Dialog::RemoveSubmodule { path, risks });
+            }
+            Action::SubmoduleRemoveNow { path, keep_git_data } => {
+                let Some(repo) = self.active_path() else { return self.sample_refusal(ctx) };
+                let steps = extras::submodule_remove_steps(&repo, &path, keep_git_data);
                 self.send(Task::Steps { repo: repo.clone(), label: "Remove submodule".into(), ok_text: Some(format!("Submodule {path} removed (commit to keep it so)")), steps, what: None, kind: OpKind::Plain, role: Role::New });
                 self.send(Task::Reload { repo });
             }

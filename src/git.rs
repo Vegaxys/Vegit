@@ -111,6 +111,9 @@ pub enum PendingOp {
     Rebase,
     CherryPick,
     Revert,
+    /// A patch file applied with `git am` stopped on a conflict. It shares the
+    /// `rebase-apply` folder with old-style rebases, but only `am` can finish it.
+    Am,
 }
 
 impl PendingOp {
@@ -120,6 +123,7 @@ impl PendingOp {
             Self::Rebase => "rebase",
             Self::CherryPick => "cherry-pick",
             Self::Revert => "revert",
+            Self::Am => "patch",
         }
     }
 
@@ -129,6 +133,7 @@ impl PendingOp {
             Self::Rebase => "rebase",
             Self::CherryPick => "cherry-pick",
             Self::Revert => "revert",
+            Self::Am => "am",
         }
     }
 }
@@ -442,6 +447,8 @@ pub fn pending_op(dir: &Path) -> Option<PendingOp> {
 fn pending_in(git_dir: &Path) -> Option<PendingOp> {
     if git_dir.join("MERGE_HEAD").exists() {
         Some(PendingOp::Merge)
+    } else if git_dir.join("rebase-apply").join("applying").exists() {
+        Some(PendingOp::Am)
     } else if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
         Some(PendingOp::Rebase)
     } else if git_dir.join("CHERRY_PICK_HEAD").exists() {
@@ -966,9 +973,9 @@ pub fn branch_sha(dir: &Path, branch: &str) -> GitResult<String> {
 }
 
 impl PendingOp {
-    /// Operations that can drop the commit they stopped on (`--skip`).
+    /// Operations that can drop the commit (or patch) they stopped on (`--skip`).
     pub fn can_skip(self) -> bool {
-        matches!(self, Self::Rebase | Self::CherryPick | Self::Revert)
+        matches!(self, Self::Rebase | Self::CherryPick | Self::Revert | Self::Am)
     }
 }
 

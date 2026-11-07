@@ -13,7 +13,7 @@ use crate::util::accent_button;
 
 pub fn width(dialog: &Dialog) -> Option<f32> {
     match dialog {
-        Dialog::Onto { .. } | Dialog::Sparse { .. } | Dialog::ApplyPatch { .. } | Dialog::CleanIgnored { .. } => Some(500.0),
+        Dialog::Onto { .. } | Dialog::Sparse { .. } | Dialog::ApplyPatch { .. } | Dialog::CleanIgnored { .. } | Dialog::RemoveSubmodule { .. } => Some(500.0),
         Dialog::AddSubmodule { .. } | Dialog::StashBranch { .. } | Dialog::BisectRun { .. } => Some(440.0),
         Dialog::Grep { .. } => Some(620.0),
         _ => None,
@@ -423,6 +423,31 @@ pub fn dialog(ui: &mut egui::Ui, dialog: &mut Dialog, tab: Option<&RepoTab>, pal
             let valid = !url.trim().is_empty() && !path.trim().is_empty();
             if crate::ui::footer(ui, pal, "Add", valid) {
                 acts.push(Action::AddSubmodule { url: url.trim().into(), path: path.trim().into() });
+                return true;
+            }
+            false
+        }
+        Dialog::RemoveSubmodule { path, risks } => {
+            title(ui, &format!("Remove the submodule {path}?"));
+            ui.label("Its folder is deleted and the removal is staged here: commit to keep it so.");
+            let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+            if risks.changes > 0 {
+                ui.label(RichText::new(format!("{} with uncommitted changes in it will be lost.", plural(risks.changes, "file"))).color(pal.removed));
+            }
+            if risks.keep_git_data() {
+                let mut what = Vec::new();
+                if risks.unpushed > 0 {
+                    what.push(format!("{} on no server", plural(risks.unpushed, "commit")));
+                }
+                if risks.stashes > 0 {
+                    what.push(plural(risks.stashes, "stash"));
+                }
+                ui.label(RichText::new(format!("It has {}: git's copy is kept in .git/modules/{path}, so they can still be recovered.", what.join(" and "))).color(pal.warn));
+            } else if risks.changes == 0 {
+                ui.label(RichText::new("Nothing in it is unsaved: everything is on its server.").color(pal.muted));
+            }
+            if crate::ui::footer(ui, pal, "Remove", true) {
+                acts.push(Action::SubmoduleRemoveNow { path: path.clone(), keep_git_data: risks.keep_git_data() });
                 return true;
             }
             false

@@ -450,6 +450,8 @@ pub enum Dialog {
     /// "Move only my commits onto": `options` are branch names.
     Onto { branch: String, options: Vec<String>, new_base: usize, old_base: usize },
     AddSubmodule { url: String, path: String },
+    /// "Remove submodule": what it would lose.
+    RemoveSubmodule { path: String, risks: crate::extras::SubmoduleRisks },
     /// Ignored files `clean -X` would delete, with their size.
     CleanIgnored { files: Vec<String>, size: u64 },
     /// "Choose folders to download": every folder and whether it is kept.
@@ -664,7 +666,9 @@ pub enum Action {
     AddSubmodule { url: String, path: String },
     SubmoduleUpdate(String),
     SubmoduleSync(String),
+    /// Asks first, with what the removal would lose.
     SubmoduleRemove(String),
+    SubmoduleRemoveNow { path: String, keep_git_data: bool },
     ListHeads(String),
     LoadFullHistory,
     CleanNew,

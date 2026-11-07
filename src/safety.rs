@@ -81,6 +81,9 @@ pub enum Step {
     Delete(String),
     /// Delete a whole folder (git's own data of a removed submodule).
     DeleteDir(std::path::PathBuf),
+    /// Remove the folders of these files (relative paths) that are left empty, deepest
+    /// first, never the working folder itself.
+    PruneEmptyDirs(Vec<String>),
     /// Save these files before what follows changes them (undo restores them).
     Backup(Vec<String>),
 }
@@ -116,7 +119,7 @@ pub fn describe(args: &[String]) -> Option<(String, ResetMode)> {
     match *a.first()? {
         "commit" => Some((if has("--amend") { "amend" } else { "commit" }.to_string(), ResetMode::Soft)),
         // Steps of an operation stopped on a conflict: the banner's Abort is their undo.
-        "merge" | "rebase" | "cherry-pick" | "revert" if has("--abort") || has("--quit") || has("--continue") || has("--skip") => None,
+        "merge" | "rebase" | "cherry-pick" | "revert" | "am" if has("--abort") || has("--quit") || has("--continue") || has("--skip") => None,
         "merge" if has("--squash") => None,
         "merge" => keep("merge"),
         "rebase" => keep("rebase"),
@@ -347,6 +350,15 @@ pub fn run_steps(dir: &Path, steps: &[Step], backups: &mut Vec<Backup>, record: 
             Step::DeleteDir(p) => {
                 if p.exists() {
                     std::fs::remove_dir_all(p).map_err(|e| format!("{}: {e}", p.display()))?;
+                }
+            }
+            Step::PruneEmptyDirs(paths) => {
+                let mut dirs: Vec<&Path> = paths.iter().flat_map(|p| Path::new(p).ancestors().skip(1)).filter(|d| !d.as_os_str().is_empty()).collect();
+                dirs.sort();
+                dirs.dedup();
+                dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+                for d in dirs {
+                    let _ = std::fs::remove_dir(dir.join(d)); // refused, as wanted, while not empty
                 }
             }
             Step::Delete(rel) => {
