@@ -6,9 +6,10 @@
 
 use std::collections::HashSet;
 
-use eframe::egui::{self, Align2, CornerRadius, FontId, Sense, Stroke, pos2, vec2};
+use eframe::egui::{self, Align2, CornerRadius, FontId, Sense, pos2, vec2};
 
 use crate::git::FileChange;
+use crate::icons::{self, Icon};
 use crate::theme::Palette;
 use crate::util::FILE_ROW_H;
 
@@ -72,20 +73,9 @@ pub fn folder_row(ui: &mut egui::Ui, name: &str, depth: usize, collapsed: bool, 
     }
     let x = full.left() + depth as f32 * INDENT;
     let cy = full.center().y;
-    let s = Stroke::new(1.5, pal.muted);
-    // Chevron
-    let c = pos2(x + 8.0, cy);
-    if collapsed {
-        p.line_segment([c + vec2(-2.0, -4.0), c + vec2(2.0, 0.0)], s);
-        p.line_segment([c + vec2(2.0, 0.0), c + vec2(-2.0, 4.0)], s);
-    } else {
-        p.line_segment([c + vec2(-4.0, -2.0), c + vec2(0.0, 2.0)], s);
-        p.line_segment([c + vec2(0.0, 2.0), c + vec2(4.0, -2.0)], s);
-    }
-    // Folder shape
-    let f = egui::Rect::from_min_size(pos2(x + 18.0, cy - 6.0), vec2(16.0, 12.0));
-    p.rect_filled(f, CornerRadius::same(3), pal.accent.gamma_multiply(0.45));
-    p.rect_filled(egui::Rect::from_min_size(f.left_top() - vec2(0.0, 2.0), vec2(7.0, 4.0)), CornerRadius::same(2), pal.accent.gamma_multiply(0.45));
+    let chevron = if collapsed { Icon::ChevronRight } else { Icon::ChevronDown };
+    icons::paint(&p, egui::Rect::from_center_size(pos2(x + 8.0, cy), vec2(13.0, 13.0)), chevron, pal.muted);
+    icons::paint(&p, egui::Rect::from_center_size(pos2(x + 26.0, cy), vec2(17.0, 17.0)), Icon::Folder, pal.accent);
     p.text(pos2(x + 40.0, cy), Align2::LEFT_CENTER, name, FontId::proportional(13.0), pal.text2());
 
     let clicked_button = match button {

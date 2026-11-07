@@ -10,6 +10,7 @@ use eframe::epaint::CubicBezierShape;
 use crate::app::{Action, Dialog, PullMode, RepoTab, Selection};
 use crate::forge;
 use crate::git::{self, RefKind};
+use crate::icons::{self, Icon};
 use crate::theme::Palette;
 use crate::util::{abs_time, avatar, rel_time};
 
@@ -18,6 +19,8 @@ const HEAD_H: f32 = 26.0;
 const LANE_W: f32 = 16.0;
 const MIN_COL: [f32; 6] = [70.0, 40.0, 160.0, 70.0, 60.0, 50.0];
 const LABELS: [&str; 6] = ["BRANCH / TAG", "GRAPH", "COMMIT MESSAGE", "AUTHOR", "WHEN", "ID"];
+/// Room an icon takes inside a ref label: the icon itself and the gap after it.
+const PILL_ICON_W: f32 = 15.0;
 
 pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f32; 6], show_desc: bool, acts: &mut Vec<Action>) {
     let wip = tab.has_wip_row();
@@ -165,10 +168,11 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f
             let mut x = cols[0].left() + 8.0;
             let mut pills: Vec<(Rect, usize)> = Vec::new();
             if let Some(st) = &c.stash {
-                let galley = rp.layout_no_wrap(format!("⊟ {st}"), FontId::proportional(12.0), pal.text2());
-                let pill = Rect::from_min_size(pos2(x, rect.center().y - 10.0), vec2(galley.size().x + 14.0, 20.0));
+                let galley = rp.layout_no_wrap(st.clone(), FontId::proportional(12.0), pal.text2());
+                let pill = Rect::from_min_size(pos2(x, rect.center().y - 10.0), vec2(galley.size().x + 14.0 + PILL_ICON_W, 20.0));
                 rp.rect_stroke(pill, CornerRadius::same(6), Stroke::new(1.0, pal.muted), StrokeKind::Inside);
-                rp.galley(pos2(pill.left() + 7.0, pill.center().y - galley.size().y / 2.0), galley, pal.text2());
+                pill_icon(&rp, pill.left() + 6.0, pill.center().y, Icon::Stash, pal.text2());
+                rp.galley(pos2(pill.left() + 7.0 + PILL_ICON_W, pill.center().y - galley.size().y / 2.0), galley, pal.text2());
             }
             if let Some(idxs) = tab.refs_by_sha.get(&c.sha) {
                 // Each branch name appears once: the local branch when there is one (with a
@@ -208,26 +212,31 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f
                     let r = &tab.snap.refs[i];
                     let is_head = r.kind == RefKind::Local && tab.snap.head_branch.as_deref() == Some(r.name.as_str());
                     // Branches: solid pill in the lane colour with white text. Tags stay outlined.
-                    let (text, fill, fg) = match r.kind {
-                        RefKind::Tag => (format!("🏷 {label}"), pal.card, pal.text2()),
-                        RefKind::Remote => (format!("☁ {label}"), lane_color, Color32::WHITE),
-                        RefKind::Local => {
-                            let mut t = if is_head { format!("✔ {label}") } else { label.clone() };
-                            if synced {
-                                t.push_str("  ☁");
-                            }
-                            (t, lane_color, Color32::WHITE)
-                        }
+                    // A leading icon tells tags, remotes and the current branch apart; a
+                    // trailing cloud means the remote copy is on this commit too.
+                    let (lead, trail, fill, fg) = match r.kind {
+                        RefKind::Tag => (Some(Icon::Tag), None, pal.card, pal.text2()),
+                        RefKind::Remote => (Some(Icon::Cloud), None, lane_color, Color32::WHITE),
+                        RefKind::Local => (is_head.then_some(Icon::Check), synced.then_some(Icon::Cloud), lane_color, Color32::WHITE),
                     };
-                    let galley = rp.layout_no_wrap(text, FontId::proportional(12.0), fg);
-                    let pill = Rect::from_min_size(pos2(x, rect.center().y - 10.0), vec2(galley.size().x + 14.0, 20.0));
+                    let galley = rp.layout_no_wrap(label, FontId::proportional(12.0), fg);
+                    let lead_w = if lead.is_some() { PILL_ICON_W } else { 0.0 };
+                    let trail_w = if trail.is_some() { PILL_ICON_W + 2.0 } else { 0.0 };
+                    let text_w = galley.size().x;
+                    let pill = Rect::from_min_size(pos2(x, rect.center().y - 10.0), vec2(text_w + 14.0 + lead_w + trail_w, 20.0));
                     rp.rect_filled(pill, CornerRadius::same(6), fill);
                     if r.kind == RefKind::Tag {
                         rp.rect_stroke(pill, CornerRadius::same(6), Stroke::new(1.0, lane_color), StrokeKind::Inside);
                     } else if is_head {
                         rp.rect_stroke(pill, CornerRadius::same(6), Stroke::new(1.5, Color32::WHITE.gamma_multiply(0.7)), StrokeKind::Inside);
                     }
-                    rp.galley(pos2(pill.left() + 7.0, pill.center().y - galley.size().y / 2.0), galley, fg);
+                    if let Some(icon) = lead {
+                        pill_icon(&rp, pill.left() + 6.0, pill.center().y, icon, fg);
+                    }
+                    rp.galley(pos2(pill.left() + 7.0 + lead_w, pill.center().y - galley.size().y / 2.0), galley, fg);
+                    if let Some(icon) = trail {
+                        pill_icon(&rp, pill.left() + 9.0 + lead_w + text_w, pill.center().y, icon, fg);
+                    }
                     if r.kind != RefKind::Tag {
                         pills.push((pill.intersect(cols[0]), i));
                     }
@@ -580,4 +589,9 @@ pub fn commit_menu(resp: &egui::Response, tab: &RepoTab, sha: &str, on_ref: Opti
             }
         }
     });
+}
+
+/// A 12 px icon in a ref label, its left edge at `x`, centred on `cy`.
+fn pill_icon(p: &egui::Painter, x: f32, cy: f32, icon: Icon, color: Color32) {
+    icons::paint(p, Rect::from_min_size(pos2(x, cy - 6.0), vec2(12.0, 12.0)), icon, color);
 }

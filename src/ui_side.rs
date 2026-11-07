@@ -1,18 +1,16 @@
 //! Left sidebar: local branches, remotes, tags and stashes.
 
-use eframe::egui::{self, RichText};
+use eframe::egui::{self, Color32, RichText};
 
 use crate::app::{Action, Dialog, PrState, RepoTab};
 use crate::git::RefKind;
+use crate::icons::{self, Icon};
 use crate::theme::Palette;
 
 pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<Action>) {
     ui.add_space(6.0);
-    ui.add(
-        egui::TextEdit::singleline(&mut tab.side_filter)
-            .hint_text("🔍  Filter branches")
-            .desired_width(f32::INFINITY),
-    );
+    let width = ui.available_width();
+    crate::util::search_field(ui, &mut tab.side_filter, "Filter branches", width, pal);
     ui.add_space(6.0);
     let filter = tab.side_filter.trim().to_lowercase();
     let keep = |name: &str| filter.is_empty() || name.to_lowercase().contains(&filter);
@@ -28,7 +26,7 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
             .map(|i| (tab.snap.refs[i].name.clone(), i))
             .collect();
         let count = locals.len();
-        section(ui, "local", &format!("💻  Local  ({count})"), pal, |ui| {
+        section(ui, "local", Icon::Computer, &format!("Local  ({count})"), pal, |ui| {
             if locals.is_empty() {
                 ui.label(RichText::new("No branches yet").color(pal.muted));
             }
@@ -45,7 +43,7 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
                 })
                 .map(|i| (tab.snap.refs[i].name[prefix.len()..].to_string(), i))
                 .collect();
-            section(ui, &format!("remote-{remote}"), &format!("☁  {remote}  ({})", items.len()), pal, |ui| {
+            section(ui, &format!("remote-{remote}"), Icon::Cloud, &format!("{remote}  ({})", items.len()), pal, |ui| {
                 branch_tree(ui, &format!("remote-{remote}"), &items, filtering, pal, &mut |ui, leaf, i| remote_item(ui, tab, i, &remote, leaf, pal, acts));
             });
         }
@@ -56,7 +54,7 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
             _ => "·".into(),
         };
         let current = tab.snap.head_branch.clone();
-        section(ui, "prs", &format!("⇄  Pull requests  ({pr_count})"), pal, |ui| match &tab.prs {
+        section(ui, "prs", Icon::PullRequest, &format!("Pull requests  ({pr_count})"), pal, |ui| match &tab.prs {
             PrState::NotLoaded => {
                 ui.label(RichText::new("Add a remote to see pull requests.").color(pal.muted).size(12.0));
             }
@@ -122,7 +120,7 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
         let tags: Vec<usize> = (0..tab.snap.refs.len())
             .filter(|&i| tab.snap.refs[i].kind == RefKind::Tag && keep(&tab.snap.refs[i].name))
             .collect();
-        section(ui, "tags", &format!("🏷  Tags  ({})", tags.len()), pal, |ui| {
+        section(ui, "tags", Icon::Tag, &format!("Tags  ({})", tags.len()), pal, |ui| {
             for i in tags.into_iter().rev() {
                 let r = &tab.snap.refs[i];
                 let resp = ui.add(egui::Button::selectable(false, RichText::new(format!("   {}", r.name)).color(pal.text2())).frame_when_inactive(false));
@@ -145,7 +143,7 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
         });
 
         // Stashes
-        section(ui, "stashes", &format!("📦  Stashes  ({})", tab.snap.stashes.len()), pal, |ui| {
+        section(ui, "stashes", Icon::Box, &format!("Stashes  ({})", tab.snap.stashes.len()), pal, |ui| {
             for s in &tab.snap.stashes {
                 let resp = ui
                     .add(egui::Button::selectable(false, RichText::new(format!("   {}", s.message)).color(pal.text2())).frame_when_inactive(false).truncate())
@@ -175,7 +173,7 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
         });
 
         // Submodules: other repositories nested in this one.
-        section(ui, "submodules", &format!("🔗  Submodules  ({})", tab.snap.submodules.len()), pal, |ui| {
+        section(ui, "submodules", Icon::Link, &format!("Submodules  ({})", tab.snap.submodules.len()), pal, |ui| {
             if tab.snap.submodules.is_empty() {
                 ui.label(RichText::new("None").color(pal.muted));
             }
@@ -230,7 +228,7 @@ fn branch_tree(ui: &mut egui::Ui, id: &str, items: &[(String, usize)], open: boo
     for (folder, sub) in folders {
         let sub_id = format!("{id}/{folder}");
         let title = RichText::new(format!("{folder}  ({})", sub.len())).color(pal.text2());
-        let mut header = egui::CollapsingHeader::new(title).id_salt(&sub_id).default_open(false);
+        let mut header = egui::CollapsingHeader::new(title).id_salt(&sub_id).default_open(false).icon(chevron(pal.muted));
         if open {
             header = header.open(Some(true));
         }
@@ -247,16 +245,19 @@ fn branch_tree(ui: &mut egui::Ui, id: &str, items: &[(String, usize)], open: boo
 fn local_item(ui: &mut egui::Ui, tab: &RepoTab, i: usize, leaf: &str, pal: &Palette, acts: &mut Vec<Action>) {
     let r = &tab.snap.refs[i];
     let is_head = tab.snap.head_branch.as_deref() == Some(r.name.as_str());
-    let mut text = if is_head { format!("✔ {leaf}") } else { format!("   {leaf}") };
-    if r.ahead > 0 {
-        text.push_str(&format!("   ↑{}", r.ahead));
+    let color = if is_head { pal.accent } else { pal.text2() };
+    // The check marks the current branch; other names keep the same indent.
+    let mut atoms = egui::Atoms::default();
+    atoms.push_right(icons::image(ui.ctx(), Icon::Check, 13.0, if is_head { color } else { Color32::TRANSPARENT }));
+    atoms.push_right(if is_head { RichText::new(leaf).strong().color(color) } else { RichText::new(leaf).color(color) });
+    for (count, icon) in [(r.ahead, Icon::ArrowUp), (r.behind, Icon::ArrowDown)] {
+        if count > 0 {
+            atoms.push_right(icons::image(ui.ctx(), icon, 12.0, color));
+            atoms.push_right(RichText::new(count.to_string()).color(color));
+        }
     }
-    if r.behind > 0 {
-        text.push_str(&format!(" ↓{}", r.behind));
-    }
-    let rich = if is_head { RichText::new(text).strong().color(pal.accent) } else { RichText::new(text).color(pal.text2()) };
     let resp = ui
-        .add(egui::Button::selectable(false, rich).frame_when_inactive(false).truncate())
+        .add(egui::Button::selectable(false, atoms).frame_when_inactive(false).truncate())
         .on_hover_text(format!("{}\nClick to show in the graph · double-click to switch to it · right-click for more", r.name));
     if resp.clicked() {
         acts.push(Action::SelectRef(r.target.clone()));
@@ -359,13 +360,30 @@ fn remote_item(ui: &mut egui::Ui, tab: &RepoTab, i: usize, remote: &str, leaf: &
     });
 }
 
-fn section(ui: &mut egui::Ui, id: &str, title: &str, pal: &Palette, body: impl FnOnce(&mut egui::Ui)) {
-    egui::CollapsingHeader::new(RichText::new(title).strong().color(pal.text))
-        .id_salt(id)
-        .default_open(true)
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 1.0;
-            body(ui);
-        });
+/// A foldable sidebar section: chevron, icon, title. Open by default; the state is kept
+/// under the same id as the former `CollapsingHeader`, so saved layouts still apply.
+fn section(ui: &mut egui::Ui, id: &str, icon: Icon, title: &str, pal: &Palette, body: impl FnOnce(&mut egui::Ui)) {
+    let state_id = ui.make_persistent_id(id);
+    let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), state_id, true);
+    let header = ui.horizontal(|ui| {
+        state.show_toggle_button(ui, chevron(pal.text2()));
+        ui.add(icons::image(ui.ctx(), icon, 16.0, pal.text2()));
+        let label = ui.add(egui::Label::new(RichText::new(title).strong().color(pal.text)).sense(egui::Sense::click()));
+        if label.clicked() {
+            state.toggle(ui);
+        }
+    });
+    state.show_body_indented(&header.response, ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        body(ui);
+    });
     ui.add_space(4.0);
+}
+
+/// Fold marker for collapsing headers: chevron right when closed, down when open.
+fn chevron(color: Color32) -> impl FnOnce(&mut egui::Ui, f32, &egui::Response) + 'static {
+    move |ui, openness, resp| {
+        let icon = if openness > 0.5 { Icon::ChevronDown } else { Icon::ChevronRight };
+        icons::paint(ui.painter(), resp.rect.expand(2.0), icon, color);
+    }
 }

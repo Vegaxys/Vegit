@@ -48,6 +48,7 @@ fn main() -> eframe::Result<()> {
             .with_title("Vegit")
             .with_inner_size([1440.0, 880.0])
             .with_min_inner_size([900.0, 560.0])
+            .with_icon(icons::app_icon(256))
             // The theme draws the whole window, title bar included.
             .with_decorations(false),
         persist_window: screenshot.is_none(),

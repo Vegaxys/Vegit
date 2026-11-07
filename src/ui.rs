@@ -13,7 +13,7 @@ use crate::forge::Forge;
 use crate::git::{self, FileState, RefKind};
 use crate::icons::{self, Icon};
 use crate::theme::{self, LaneMode, Palette, ThemeChoice};
-use crate::util::{GAP, accent_button, card, fill_tile, tile};
+use crate::util::{GAP, accent_button, card, fill_tile, icon_label, tile};
 use crate::{ui_detail, ui_graph, ui_side};
 
 /// Frames drawn before the `--screenshot` picture is taken.
@@ -106,22 +106,8 @@ impl VegitApp {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
         }
         ui.horizontal(|ui| {
-            // Logo: three dots joined like a tiny branch.
             let (r, _) = ui.allocate_exact_size(vec2(28.0, 24.0), Sense::hover());
-            let p = ui.painter();
-            let a = pos2(r.left() + 7.0, r.bottom() - 5.0);
-            let b = pos2(r.left() + 7.0, r.top() + 5.0);
-            let c = pos2(r.right() - 6.0, r.center().y - 1.0);
-            p.line_segment([a, b], Stroke::new(2.5, pal.lane(0)));
-            p.add(eframe::epaint::QuadraticBezierShape::from_points_stroke(
-                [a, pos2(c.x, a.y), c],
-                false,
-                Color32::TRANSPARENT,
-                Stroke::new(2.5, pal.lane(1)),
-            ));
-            p.circle_filled(a, 4.0, pal.lane(0));
-            p.circle_filled(b, 4.0, pal.lane(0));
-            p.circle_filled(c, 4.0, pal.lane(1));
+            icons::paint_logo(ui.painter(), r);
             ui.label(RichText::new("Vegit").strong().size(15.0));
             ui.add_space(14.0);
 
@@ -144,7 +130,7 @@ impl VegitApp {
                             if ui.add(egui::Button::new(label).frame(false)).clicked() {
                                 self.actions.push(Action::SwitchTab(i));
                             }
-                            if ui.add(egui::Button::new(RichText::new("×").color(pal.muted)).frame(false)).on_hover_text("Close tab").clicked() {
+                            if icons::ghost_button(ui, Icon::Close, 12.0, pal.muted, pal.hover).on_hover_text("Close tab").clicked() {
                                 self.actions.push(Action::CloseTab(i));
                             }
                         });
@@ -157,11 +143,11 @@ impl VegitApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 window_buttons(ui, pal);
                 ui.add_space(6.0);
-                let access_btn = egui::Button::new(RichText::new("🔑  Access")).corner_radius(CornerRadius::same(8));
+                let access_btn = egui::Button::image_and_text(icons::image(ui.ctx(), Icon::Key, 16.0, pal.text), "Access").corner_radius(CornerRadius::same(8));
                 if ui.add(access_btn).on_hover_text("Sign in to reach private repositories").clicked() {
                     self.actions.push(Action::Dialog(Dialog::Access(AccessForm { host: "github.com".into(), ..Default::default() })));
                 }
-                if icons::icon_button(ui, Icon::Gear, pal.text2(), pal.panel, pal.hover).on_hover_text("Settings").clicked() {
+                if icons::icon_button(ui, Icon::Settings, pal.text2(), pal.panel, pal.hover).on_hover_text("Settings").clicked() {
                     self.actions.push(Action::Dialog(Dialog::Settings));
                 }
                 self.theme_menu(ui, pal);
@@ -176,7 +162,7 @@ impl VegitApp {
 
     fn theme_menu(&mut self, ui: &mut egui::Ui, pal: &Palette) {
         let current = self.settings.theme;
-        ui.menu_button(RichText::new(format!("🎨  {}", current.label())), |ui| {
+        ui.menu_image_text_button(icons::image(ui.ctx(), Icon::Palette, 16.0, pal.text), current.label(), |ui| {
             crate::util::menu_pad(ui);
             ui.set_min_width(330.0);
             ui.label(RichText::new("Theme preset").weak());
@@ -221,7 +207,8 @@ impl VegitApp {
                             tab.snap.head_sha.as_deref().map_or("no commits".into(), |h| format!("detached {}", git::short(h)))
                         });
                         let locals: Vec<String> = tab.snap.refs.iter().filter(|r| r.kind == RefKind::Local).map(|r| r.name.clone()).collect();
-                        ui.menu_button(RichText::new(format!("⎇  {branch}")).color(pal.accent), |ui| {
+                        let branch_icon = icons::image(ui.ctx(), Icon::Branch, 15.0, pal.accent);
+                        ui.menu_image_text_button(branch_icon, RichText::new(branch).color(pal.accent), |ui| {
                             crate::util::menu_pad(ui);
                             // Room to breathe even with short branch names.
                             ui.set_min_width(240.0);
@@ -312,9 +299,11 @@ impl VegitApp {
                         // Sync and changes, as compact numbers.
                         match tab.snap.current_ref().and_then(|r| r.upstream.clone().map(|u| (u, r.ahead, r.behind))) {
                             Some((up, ahead, behind)) => {
-                                ui.label(RichText::new(format!("↑{ahead}")).size(17.0).strong().color(if ahead > 0 { pal.accent } else { pal.muted }))
+                                let ahead_col = if ahead > 0 { pal.accent } else { pal.muted };
+                                let behind_col = if behind > 0 { pal.warn } else { pal.muted };
+                                icon_label(ui, Icon::ArrowUp, 15.0, RichText::new(ahead.to_string()).size(17.0).strong().color(ahead_col), ahead_col)
                                     .on_hover_text(format!("{ahead} commit(s) to push to {up}"));
-                                ui.label(RichText::new(format!("↓{behind}")).size(17.0).strong().color(if behind > 0 { pal.warn } else { pal.muted }))
+                                icon_label(ui, Icon::ArrowDown, 15.0, RichText::new(behind.to_string()).size(17.0).strong().color(behind_col), behind_col)
                                     .on_hover_text(format!("{behind} commit(s) to pull from {up}"));
                             }
                             None => {
@@ -327,17 +316,14 @@ impl VegitApp {
                         ui.label(RichText::new(format!("changes · {} staged", st.staged.len())).size(12.0).color(pal.muted));
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if icons::icon_button(ui, Icon::Folder, pal.text, pal.card, pal.hover).on_hover_text("Open the folder").clicked() {
+                            if icons::icon_button(ui, Icon::FolderOpen, pal.text, pal.card, pal.hover).on_hover_text("Open the folder").clicked() {
                                 acts.push(Action::OpenInExplorer(None));
                             }
                             if icons::icon_button(ui, Icon::Refresh, pal.text, pal.card, pal.hover).on_hover_text("Refresh (F5)").clicked() {
                                 acts.push(Action::Refresh);
                             }
-                            ui.add(
-                                egui::TextEdit::singleline(&mut tab.search)
-                                    .hint_text("🔍  Find commits")
-                                    .desired_width(ui.available_width().clamp(60.0, 240.0)),
-                            );
+                            let width = ui.available_width().clamp(60.0, 240.0);
+                            crate::util::search_field(ui, &mut tab.search, "Find commits", width, pal);
                         });
                     });
                 });
@@ -695,22 +681,13 @@ impl VegitApp {
 fn pr_dialog(ui: &mut egui::Ui, form: &mut PrForm, pal: &Palette, acts: &mut Vec<Action>) -> bool {
     let noun = if form.forge == Forge::GitLab { "Merge Request" } else { "Pull Request" };
     let mut done = false;
-    // Title row with a small branch-merge drawing and a close cross.
+    // Title row with the pull request icon and a close cross.
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
-        let p = ui.painter();
-        let s = Stroke::new(1.8, pal.text2());
-        p.line_segment([r.left_top() + vec2(6.0, 3.0), r.left_bottom() + vec2(6.0, -3.0)], s);
-        p.add(eframe::epaint::QuadraticBezierShape::from_points_stroke(
-            [r.left_bottom() + vec2(6.0, -6.0), r.right_bottom() + vec2(-5.0, -6.0), r.right_top() + vec2(-5.0, 6.0)],
-            false,
-            Color32::TRANSPARENT,
-            s,
-        ));
-        p.circle_stroke(r.right_top() + vec2(-5.0, 4.0), 2.5, s);
+        icons::paint(ui.painter(), r, Icon::PullRequest, pal.text2());
         ui.label(RichText::new(format!("Create {noun}")).size(20.0).strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add(egui::Button::new(RichText::new("✕").size(16.0).color(pal.text2())).frame(false)).on_hover_text("Close").clicked() {
+            if icons::ghost_button(ui, Icon::Close, 16.0, pal.text2(), pal.hover).on_hover_text("Close").clicked() {
                 ui.data_mut(|d| d.insert_temp(egui::Id::unique("dialog_cancel"), true));
             }
         });
@@ -769,7 +746,7 @@ fn pr_dialog(ui: &mut egui::Ui, form: &mut PrForm, pal: &Palette, acts: &mut Vec
                 changed_from |= ui.selectable_value(&mut form.from, i, label).changed();
             }
         });
-        ui.label(RichText::new("→").size(18.0).color(pal.text2()));
+        ui.add(icons::image(ui.ctx(), Icon::StatusRenamed, 18.0, pal.text2()));
         let to_text = remote_label(form, form.to);
         let mut changed_to = false;
         egui::ComboBox::from_id_salt("pr_to_repo").width(col_w).selected_text(to_text).show_ui(ui, |ui| {
@@ -922,7 +899,7 @@ fn settings_dialog(ui: &mut egui::Ui, s: &mut Settings, pal: &Palette) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("Settings").size(22.0).strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add(egui::Button::new(RichText::new("✕").size(16.0).color(pal.text2())).frame(false)).on_hover_text("Close").clicked() {
+            if icons::ghost_button(ui, Icon::Close, 16.0, pal.text2(), pal.hover).on_hover_text("Close").clicked() {
                 ui.data_mut(|d| d.insert_temp(egui::Id::unique("dialog_cancel"), true));
             }
         });
@@ -1166,26 +1143,14 @@ fn window_buttons(ui: &mut egui::Ui, pal: &Palette) {
         if hover {
             p.rect_filled(r, CornerRadius::same(8), if kind == 0 { pal.removed } else { pal.hover });
         }
-        let c = r.center();
-        let s = Stroke::new(1.3, if hover && kind == 0 { Color32::WHITE } else { pal.text2() });
-        match kind {
-            0 => {
-                p.line_segment([c - vec2(5.0, 5.0), c + vec2(5.0, 5.0)], s);
-                p.line_segment([c + vec2(-5.0, 5.0), c + vec2(5.0, -5.0)], s);
-            }
-            1 => {
-                if maximized {
-                    p.rect_stroke(Rect::from_center_size(c + vec2(-1.5, 1.5), vec2(8.0, 8.0)), CornerRadius::same(1), s, egui::StrokeKind::Middle);
-                    p.line_segment([c + vec2(-2.0, -5.5), c + vec2(5.5, -5.5)], s);
-                    p.line_segment([c + vec2(5.5, -5.5), c + vec2(5.5, 2.0)], s);
-                } else {
-                    p.rect_stroke(Rect::from_center_size(c, vec2(10.0, 10.0)), CornerRadius::same(1), s, egui::StrokeKind::Middle);
-                }
-            }
-            _ => {
-                p.line_segment([c - vec2(5.0, 0.0), c + vec2(5.0, 0.0)], s);
-            }
-        }
+        let icon = match kind {
+            0 => Icon::Close,
+            1 if maximized => Icon::WindowRestore,
+            1 => Icon::WindowMaximize,
+            _ => Icon::WindowMinimize,
+        };
+        let color = if hover && kind == 0 { Color32::WHITE } else { pal.text2() };
+        icons::paint(p, Rect::from_center_size(r.center(), vec2(16.0, 16.0)), icon, color);
         if resp.clicked() {
             let cmd = match kind {
                 0 => egui::ViewportCommand::Close,

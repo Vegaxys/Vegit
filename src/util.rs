@@ -4,6 +4,7 @@ use chrono::{Local, TimeZone};
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Pos2, Sense, pos2, vec2};
 
 use crate::git::{FileChange, FileState};
+use crate::icons::{self, Icon};
 use crate::theme::Palette;
 
 /// Round avatar: the author's profile picture when it is available, otherwise initials
@@ -68,32 +69,37 @@ pub const FILE_ROW_H: f32 = 28.0;
 /// Small coloured mark for a file's change: pencil (modified), plus (new), minus
 /// (deleted), arrow (renamed), exclamation (conflict).
 pub fn status_icon(p: &egui::Painter, c: Pos2, state: FileState, color: Color32) {
-    let s = egui::Stroke::new(1.8, color);
-    match state {
-        FileState::Added | FileState::Untracked => {
-            p.line_segment([c - vec2(5.0, 0.0), c + vec2(5.0, 0.0)], s);
-            p.line_segment([c - vec2(0.0, 5.0), c + vec2(0.0, 5.0)], s);
-        }
-        FileState::Deleted => {
-            p.line_segment([c - vec2(5.0, 0.0), c + vec2(5.0, 0.0)], s);
-        }
-        FileState::Renamed | FileState::TypeChange => {
-            p.line_segment([c - vec2(5.0, 0.0), c + vec2(5.0, 0.0)], s);
-            p.line_segment([c + vec2(5.0, 0.0), c + vec2(1.5, -3.5)], s);
-            p.line_segment([c + vec2(5.0, 0.0), c + vec2(1.5, 3.5)], s);
-        }
-        FileState::Conflicted => {
-            p.line_segment([c - vec2(0.0, 5.5), c + vec2(0.0, 2.0)], s);
-            p.circle_filled(c + vec2(0.0, 5.0), 1.2, color);
-        }
-        FileState::Modified => {
-            // A small pencil: body, then the tip.
-            let a = c + vec2(4.5, -4.5);
-            let b = c + vec2(-2.5, 2.5);
-            p.line_segment([a, b], egui::Stroke::new(3.0, color));
-            p.add(egui::Shape::convex_polygon(vec![b + vec2(-1.5, -1.5), b + vec2(1.5, 1.5), c + vec2(-5.0, 5.0)], color, egui::Stroke::NONE));
-        }
-    }
+    let icon = match state {
+        FileState::Added | FileState::Untracked => Icon::StatusAdded,
+        FileState::Deleted => Icon::StatusDeleted,
+        FileState::Renamed | FileState::TypeChange => Icon::StatusRenamed,
+        FileState::Conflicted => Icon::StatusConflict,
+        FileState::Modified => Icon::StatusModified,
+    };
+    icons::paint(p, egui::Rect::from_center_size(c, vec2(15.0, 15.0)), icon, color);
+}
+
+/// An icon followed by a text, hoverable as one piece (for a tooltip).
+pub fn icon_label(ui: &mut egui::Ui, icon: Icon, side: f32, text: egui::RichText, color: Color32) -> egui::Response {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.add(icons::image(ui.ctx(), icon, side, color));
+        ui.label(text);
+    })
+    .response
+}
+
+/// Single-line search box with a magnifier drawn inside, before the text.
+pub fn search_field(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32, pal: &Palette) -> egui::Response {
+    let resp = ui.add(
+        egui::TextEdit::singleline(text)
+            .hint_text(hint)
+            .margin(egui::Margin { left: 28, right: 6, top: 4, bottom: 4 })
+            .desired_width(width),
+    );
+    let r = resp.rect;
+    icons::paint(ui.painter(), egui::Rect::from_center_size(pos2(r.left() + 15.0, r.center().y), vec2(15.0, 15.0)), Icon::Search, pal.muted);
+    resp
 }
 
 /// A clickable file line: change mark, then the path with its folder in a quieter colour

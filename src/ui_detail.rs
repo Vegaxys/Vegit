@@ -10,6 +10,7 @@ use crate::app::{Action, Dialog, FileViewKind, HunkMode, ImageState, ListId, Rep
 use crate::diff::{DiffMode, DiffRow, LineKind, ParsedDiff, SplitRow};
 use crate::filelist::{self, Entry, INDENT};
 use crate::git::{self, DiffSource, FileChange, FileState};
+use crate::icons::{self, Icon};
 use crate::theme::Palette;
 use crate::util::{FILE_ROW_H, abs_time, accent_button, avatar, card, file_row, rel_time, section_title, segmented};
 
@@ -85,7 +86,7 @@ fn wip(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, sort_by_
                     p.rect_filled(trash, CornerRadius::same(5), pal.removed.gamma_multiply(0.18));
                 }
                 p.rect_stroke(trash, CornerRadius::same(5), Stroke::new(1.0, col), egui::StrokeKind::Inside);
-                crate::icons::paint(p, trash.shrink(6.0), crate::icons::Icon::Trash, col);
+                icons::paint(p, trash.shrink(6.0), Icon::Trash, col);
             }
             if tr.on_hover_text("Discard all unstaged changes").clicked() && can_discard {
                 acts.push(Action::Dialog(Dialog::Confirm {
@@ -125,8 +126,13 @@ fn wip(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, sort_by_
                 if sr.hovered() {
                     p.rect_filled(sort_r, CornerRadius::same(5), pal.hover);
                 }
-                let label = if sort_by_status { "± ↓" } else { "A-Z" };
-                p.text(sort_r.center(), Align2::CENTER_CENTER, label, egui::FontId::proportional(12.0), pal.text2());
+                if sort_by_status {
+                    // "±" stays a character; the arrow is the sort direction icon.
+                    p.text(sort_r.center() - vec2(5.0, 0.0), Align2::CENTER_CENTER, "±", egui::FontId::proportional(12.0), pal.text2());
+                    icons::paint(p, Rect::from_center_size(sort_r.center() + vec2(6.0, 0.0), vec2(13.0, 13.0)), Icon::ArrowDown, pal.text2());
+                } else {
+                    p.text(sort_r.center(), Align2::CENTER_CENTER, "A-Z", egui::FontId::proportional(12.0), pal.text2());
+                }
             }
             let tip = if sort_by_status { "Sorted by kind of change (click: by name)" } else { "Sorted by name (click: by kind of change)" };
             if sr.on_hover_text(tip).clicked() {
@@ -207,15 +213,8 @@ fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool,
         // Chevron and title fold the list.
         let folded = tab.folded[list as usize];
         let (cr, cresp) = ui.allocate_exact_size(vec2(14.0, 20.0), Sense::click());
-        let c = cr.center();
-        let s = Stroke::new(1.6, pal.text2());
-        if folded {
-            ui.painter().line_segment([c + vec2(-2.0, -4.0), c + vec2(2.0, 0.0)], s);
-            ui.painter().line_segment([c + vec2(2.0, 0.0), c + vec2(-2.0, 4.0)], s);
-        } else {
-            ui.painter().line_segment([c + vec2(-4.0, -2.0), c + vec2(0.0, 2.0)], s);
-            ui.painter().line_segment([c + vec2(0.0, 2.0), c + vec2(4.0, -2.0)], s);
-        }
+        let chevron = if folded { Icon::ChevronRight } else { Icon::ChevronDown };
+        icons::paint(ui.painter(), Rect::from_center_size(cr.center(), vec2(14.0, 14.0)), chevron, pal.text2());
         let tresp = ui.add(egui::Label::new(RichText::new(format!("{title} ({})", files.len())).size(14.0).color(pal.text)).sense(Sense::click()));
         if cresp.clicked() || tresp.clicked() {
             tab.folded[list as usize] = !folded;
@@ -470,9 +469,7 @@ fn composer(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
         let p = ui.painter();
         p.rect_filled(commit_tab, CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, pal.card);
         let c = pos2(commit_tab.left() + 18.0, commit_tab.center().y);
-        p.circle_stroke(c, 4.0, Stroke::new(1.6, pal.text));
-        p.line_segment([c - vec2(9.0, 0.0), c - vec2(4.0, 0.0)], Stroke::new(1.6, pal.text));
-        p.line_segment([c + vec2(4.0, 0.0), c + vec2(9.0, 0.0)], Stroke::new(1.6, pal.text));
+        icons::paint(p, Rect::from_center_size(c, vec2(18.0, 18.0)), Icon::Commit, pal.text);
         p.text(pos2(commit_tab.left() + 34.0, commit_tab.center().y), Align2::LEFT_CENTER, "Commit", egui::FontId::proportional(14.0), pal.text);
         p.rect_filled(Rect::from_min_size(pos2(bar.left(), bar.bottom() - 1.0), vec2(bar.width(), 1.0)), CornerRadius::ZERO, pal.border);
     }
@@ -481,7 +478,7 @@ fn composer(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
     if sr.hovered() {
         ui.painter().rect_filled(stash_r, CornerRadius::same(5), pal.hover);
     }
-    crate::icons::paint(ui.painter(), stash_r.shrink2(vec2(7.0, 6.0)), crate::icons::Icon::Stash, pal.text2());
+    icons::paint(ui.painter(), stash_r.shrink2(vec2(7.0, 6.0)), Icon::Stash, pal.text2());
     if sr.on_hover_text("Stash these changes").clicked() && !tab.snap.status.is_clean() {
         acts.push(Action::Dialog(Dialog::Stash { message: String::new(), include_untracked: true }));
     }
@@ -575,8 +572,9 @@ fn commit(ui: &mut egui::Ui, tab: &mut RepoTab, sha: &str, pal: &Palette, tree: 
             card(pal).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 // Click "commit 1a2b3c4" to copy its full SHA or its short id.
+                let caret = icons::image(ui.ctx(), Icon::CaretDown, 14.0, pal.muted);
                 let title = ui
-                    .add(egui::Label::new(RichText::new(format!("commit {}  ▾", git::short(sha))).monospace().color(pal.muted)).sense(Sense::click()))
+                    .add(egui::Button::new((RichText::new(format!("commit {}", git::short(sha))).monospace().color(pal.muted), caret)).frame(false))
                     .on_hover_text("Click to copy");
                 egui::Popup::menu(&title).show(|ui| {
                     crate::util::menu_pad(ui);
@@ -677,7 +675,7 @@ pub fn diff_view(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, mode: Diff
     };
     ui.horizontal(|ui| {
         if !embedded {
-            if ui.button("← Back").on_hover_text("Back to the history (Esc)").clicked() {
+            if back_button(ui, pal).clicked() {
                 acts.push(Action::CloseDiff);
             }
             ui.add_space(4.0);
@@ -719,10 +717,10 @@ pub fn diff_view(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, mode: Diff
         }
         let showing_code = !(dv.render && dv.images.is_some());
         if showing_code {
-            if group_button(ui, pal, "↑", false).on_hover_text("Previous change").clicked() {
+            if group_icon_button(ui, pal, Icon::ArrowUp).on_hover_text("Previous change").clicked() {
                 acts.push(Action::Jump(false));
             }
-            if group_button(ui, pal, "↓", false).on_hover_text("Next change").clicked() {
+            if group_icon_button(ui, pal, Icon::ArrowDown).on_hover_text("Next change").clicked() {
                 acts.push(Action::Jump(true));
             }
             ui.add_space(8.0);
@@ -886,6 +884,20 @@ fn group_button(ui: &mut egui::Ui, pal: &Palette, text: &str, on: bool) -> egui:
     ui.add(b)
 }
 
+/// [`group_button`] with an icon instead of a label.
+fn group_icon_button(ui: &mut egui::Ui, pal: &Palette, icon: Icon) -> egui::Response {
+    let b = egui::Button::image(icons::image(ui.ctx(), icon, 14.0, pal.text2()))
+        .fill(pal.canvas)
+        .corner_radius(CornerRadius::same(8))
+        .min_size(vec2(28.0, 24.0));
+    ui.add(b)
+}
+
+/// "Back to the history" button of the diff and file views (Esc does the same).
+fn back_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
+    ui.add(egui::Button::image_and_text(icons::image(ui.ctx(), Icon::ArrowLeft, 14.0, pal.text), "Back")).on_hover_text("Back to the history (Esc)")
+}
+
 const HISTORY_ROW_H: f32 = 46.0;
 const BLAME_ROW_H: f32 = 20.0;
 
@@ -895,7 +907,7 @@ pub fn file_view(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, mode: Diff
     let path = fv.path.clone();
     let kind = fv.kind;
     ui.horizontal(|ui| {
-        if ui.button("← Back").on_hover_text("Back to the history (Esc)").clicked() {
+        if back_button(ui, pal).clicked() {
             acts.push(Action::CloseFileView);
         }
         ui.add_space(4.0);

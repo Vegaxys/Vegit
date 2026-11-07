@@ -99,3 +99,6 @@ cargo test -- --ignored
 | `src/theme.rs` | Color palettes and fonts |
 | `src/ui*.rs` | Window, sidebar, graph and detail panels |
 | `src/demo.rs` | Built-in sample repository |
+| `src/icons.rs` | Draws the SVG icons, tinted with the theme colour |
+| `assets/icons/`, `assets/brand/` | Icons, logo and app icon, exported as SVG from the Figma icon sheet |
+| `build.rs` | Turns the app icon into the Windows `.exe` icon |
