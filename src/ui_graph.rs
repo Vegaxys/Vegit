@@ -223,7 +223,7 @@ pub fn show(
             let painter = ui.painter().clone();
 
             if wip && row == 0 {
-                let selected = tab.selection == Selection::Wip;
+                let selected = tab.selection == Selection::Wip && tab.picked_commits.is_empty();
                 paint_row_bg(&painter, rect, pal, selected, resp.hovered(), false);
                 let n = tab.snap.status.staged.len() + tab.snap.status.unstaged.len();
                 let label = if tab.snap.head_sha.is_none() {
@@ -242,7 +242,8 @@ pub fn show(
             }
 
             let c = &tab.snap.commits[row - offset];
-            let selected = tab.selection == Selection::Commit(c.sha.clone());
+            let picked = tab.picked_commits.contains(&c.sha);
+            let selected = picked || (tab.picked_commits.is_empty() && tab.selection == Selection::Commit(c.sha.clone()));
             let dim = (!search.is_empty() && !matches_search(c, &search)) || author_filter.as_ref().is_some_and(|a| a != &c.author);
             paint_row_bg(&painter, rect, pal, selected, resp.hovered(), row % 2 == 1);
             let text_col = if dim { pal.muted.gamma_multiply(0.6) } else { pal.text };
@@ -384,12 +385,25 @@ pub fn show(
             painter.with_clip_rect(cols[4]).text(pos2(cols[4].left() + 10.0, rect.center().y), Align2::LEFT_CENTER, short_date_time(c.time), FontId::proportional(12.5), pal.muted);
             painter.with_clip_rect(cols[5]).text(pos2(cols[5].left() + 10.0, rect.center().y), Align2::LEFT_CENTER, git::short(&c.sha), FontId::monospace(12.0), pal.muted);
 
-            let resp = resp.on_hover_text_at_pointer(format!("{}\n{} · {}", c.summary, c.author, abs_time(c.time)));
+            let resp = resp.on_hover_text_at_pointer(format!("{}\n{} · {}\nCtrl+click or Shift+click to pick several", c.summary, c.author, abs_time(c.time)));
             if resp.clicked() {
-                acts.push(Action::Select(Selection::Commit(c.sha.clone())));
+                // Ctrl+click adds or removes a commit, Shift+click picks a range; a plain click
+                // goes back to one selected commit.
+                let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+                if ctrl || shift {
+                    acts.push(Action::PickCommit { sha: c.sha.clone(), toggle: ctrl, range: shift });
+                } else {
+                    acts.push(Action::ClearPicked);
+                    acts.push(Action::Select(Selection::Commit(c.sha.clone())));
+                }
             }
             for (pill, i) in pills {
-                let pr = ui.interact(pill, ui.scope_id().with(("pill", &c.sha, i)), Sense::click());
+                let pr = ui.interact(pill, ui.scope_id().with(("pill", &c.sha, i)), Sense::click_and_drag());
+                let r = &tab.snap.refs[i];
+                crate::ui_quick::drag_branch(&pr, &r.name);
+                if r.kind == RefKind::Local {
+                    crate::ui_quick::drop_on_branch(ui, &pr, &r.name, pal, acts);
+                }
                 if pr.double_clicked() {
                     let r = &tab.snap.refs[i];
                     acts.push(match r.kind {
@@ -399,7 +413,7 @@ pub fn show(
                 } else if pr.clicked() {
                     acts.push(Action::Select(Selection::Commit(c.sha.clone())));
                 }
-                let pr = pr.on_hover_text("Double-click to switch to this branch");
+                let pr = pr.on_hover_text("Double-click to switch to this branch · drag it onto another branch to merge or replay it");
                 commit_menu(&pr, tab, &c.sha, Some(i), acts);
             }
             if let Some((br, list)) = badge_list {
@@ -431,7 +445,11 @@ pub fn show(
                     }
                 });
             }
-            commit_menu(&resp, tab, &c.sha, None, acts);
+            if picked && tab.picked_commits.len() > 1 {
+                selection_menu(&resp, tab, acts);
+            } else {
+                commit_menu(&resp, tab, &c.sha, None, acts);
+            }
         }
 
         // Pass 2: the graph, painted over the row backgrounds so lines run uninterrupted,
@@ -551,6 +569,27 @@ fn git_action(label: String, args: &[&str]) -> Action {
     Action::Git { label, args: args.iter().map(|s| s.to_string()).collect(), background: false }
 }
 
+/// Right-click menu of several picked commits. The actions built on picking (copy them onto
+/// a branch, compare two) come with the next phases; picking itself is the foundation.
+fn selection_menu(resp: &egui::Response, tab: &RepoTab, acts: &mut Vec<Action>) {
+    let n = tab.picked_commits.len();
+    resp.context_menu(|ui| {
+        crate::util::menu_pad(ui);
+        ui.label(RichText::new(format!("{n} commits picked")).weak());
+        if ui.button(format!("Copy {n} commit SHAs")).clicked() {
+            // Oldest first, the order they were made in.
+            let mut picked: Vec<(usize, &String)> = tab.picked_commits.iter().filter_map(|s| tab.commit_index(s).map(|i| (i, s))).collect();
+            picked.sort_by_key(|(i, _)| std::cmp::Reverse(*i));
+            acts.push(Action::Copy(picked.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join("\n")));
+            ui.close();
+        }
+        if ui.button("Clear the selection").clicked() {
+            acts.push(Action::ClearPicked);
+            ui.close();
+        }
+    });
+}
+
 /// Right-click menu of a graph row (any row, not only the checked-out one). `on_ref` is the
 /// branch label that was right-clicked, if any; otherwise the row's own branch is used.
 pub fn commit_menu(resp: &egui::Response, tab: &RepoTab, sha: &str, on_ref: Option<usize>, acts: &mut Vec<Action>) {
@@ -571,12 +610,7 @@ pub fn commit_menu(resp: &egui::Response, tab: &RepoTab, sha: &str, on_ref: Opti
                 ui.close();
             }
             if ui.button("Delete stash").clicked() {
-                acts.push(Action::Dialog(Dialog::Confirm {
-                    title: "Delete this stash?".into(),
-                    body: "The saved changes will be lost.".into(),
-                    confirm: "Delete".into(),
-                    then: Box::new(git_action("Stash deleted".into(), &["stash", "drop", &st])),
-                }));
+                acts.push(git_action("Stash deleted".into(), &["stash", "drop", &st]));
                 ui.close();
             }
             ui.separator();
@@ -694,13 +728,9 @@ pub fn commit_menu(resp: &egui::Response, tab: &RepoTab, sha: &str, on_ref: Opti
                 acts.push(git_action("Reset (mixed)".into(), &["reset", "--mixed", &sha]));
                 ui.close();
             }
-            if ui.button("Hard: throw away all changes").clicked() {
-                acts.push(Action::Dialog(Dialog::Confirm {
-                    title: "Throw away changes?".into(),
-                    body: format!("The current branch will point at {short} and every uncommitted change will be lost. This can't be undone."),
-                    confirm: "Reset hard".into(),
-                    then: Box::new(git_action("Reset (hard)".into(), &["reset", "--hard", &sha])),
-                }));
+            // No confirmation since the safety net: changed files are saved first, Undo restores them.
+            if ui.button("Hard: throw away all changes").on_hover_text("Uncommitted changes are saved first: Undo brings them back.").clicked() {
+                acts.push(git_action("Reset (hard)".into(), &["reset", "--hard", &sha]));
                 ui.close();
             }
         });

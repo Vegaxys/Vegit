@@ -50,6 +50,17 @@ hooks, config and SSH keys behave exactly as they do in a terminal.
   remote branch was deleted shows « gone » and offers « Delete local branch too ».
 - **Deleting a branch** happens at once with an Undo in the toast. If the branch has commits that no other
   branch has, they are listed first and « Delete anyway » is needed.
+- **Undo for every local action**: commits, merges, rebases, resets (hard ones too), branch and tag
+  changes, stashes and discards are recorded; the toolbar says what it takes back (« Undo rebase »,
+  « Undo discard (3 files) »), each toast has its Undo, and Ctrl+Z / Ctrl+Y work. Files a discard or a hard
+  reset would lose are saved first in `refs/vegit/backups/` (kept 30 days). Once a branch is pushed, its
+  Undo is greyed: undoing would need a force push. Discards, hard resets and stash deletes no longer ask
+  for confirmation.
+- **Activity** (sidebar): the recent history of the repository (reflog) in plain sentences; click a line
+  to show it, right-click to restore it as a new branch.
+- **Drag and drop**: drag a branch (graph label or sidebar) onto a local branch for « Bring … into … »,
+  « … as one commit », « Replay … on top of … » or the « More options ».
+- **Picking several commits**: Ctrl+click and Shift+click in the graph; the detail panel lists them.
 - **Identity**: when git doesn't know your name or e-mail, the commit panel asks « Who are you? » (for all
   projects or only this one). Settings → Identity shows both levels and which one applies.
 - **File history and blame** for any file.
@@ -121,7 +132,7 @@ In screenshot mode, environment variables open other screens of the sample proje
 | `VEGIT_PREVIEW_PR=1` | The Create Pull Request dialog |
 | `VEGIT_PREVIEW_CONFLICT=1` | A merge stopped on a conflicted file |
 | `VEGIT_PREVIEW_SETTINGS=1`, `VEGIT_PREVIEW_ACCESS=1` | The settings or the access dialog |
-| `VEGIT_PREVIEW_QUICK=remote` | `remote`, `push`, `unmerged`: Add remote, Push…, delete an unmerged branch; `identity`: « Who are you? »; `rebase`: the banner with « Skip this commit »; `toast`: a toast with Undo |
+| `VEGIT_PREVIEW_QUICK=remote` | `remote`, `push`, `unmerged`: Add remote, Push…, delete an unmerged branch; `identity`: « Who are you? »; `rebase`: the banner with « Skip this commit »; `toast`: a toast with Undo; `undo`: named Undo / Redo; `picked`: three picked commits; `drop`: the menu after a drag and drop |
 
 For example (in a POSIX shell):
 
@@ -140,7 +151,9 @@ cargo test
 The tests run the git layer against throwaway repositories in the temp folder (log, refs and status
 parsing, hunk staging, graph layout) and against a local bare repository standing in for the server
 (remotes, pushing and deleting tags, upstream and "gone" branches, forced delete and its restore, skipping
-during a rebase, identity at the project level, merge options). One extra test lists the open pull requests of a public GitHub
+during a rebase, identity at the project level, merge options), and the safety net (undo of commits,
+branch changes, discards with their backups, hard resets, merges into another branch and stashes; backup
+purge; the reflog in words). One extra test lists the open pull requests of a public GitHub
 repository; it needs network access, so it is ignored by default. Run it with:
 
 ```bash

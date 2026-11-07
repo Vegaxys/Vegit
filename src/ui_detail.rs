@@ -19,9 +19,45 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, sor
         loading(ui, "Reading the repository…");
         return;
     }
+    if tab.picked_commits.len() > 1 {
+        return picked(ui, tab, pal, acts);
+    }
     match tab.selection.clone() {
         Selection::Wip => wip(ui, tab, pal, tree, sort_by_status, acts),
         Selection::Commit(sha) => commit(ui, tab, &sha, pal, tree, acts),
+    }
+}
+
+/// Several commits picked in the graph (Ctrl+click / Shift+click): the list, oldest first.
+fn picked(ui: &mut egui::Ui, tab: &RepoTab, pal: &Palette, acts: &mut Vec<Action>) {
+    let mut list: Vec<&git::Commit> = tab.picked_commits.iter().filter_map(|s| tab.commit(s)).collect();
+    list.sort_by_key(|c| std::cmp::Reverse(tab.commit_index(&c.sha).unwrap_or(0)));
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("{} commits picked", list.len())).size(18.0).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Clear").on_hover_text("Back to one selected commit (Esc)").clicked() {
+                acts.push(Action::ClearPicked);
+            }
+        });
+    });
+    ui.label(RichText::new("Ctrl+click adds or removes one, Shift+click picks a range. Right-click one of them for what to do with them.").size(12.0).color(pal.muted));
+    ui.add_space(6.0);
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+        for c in list {
+            let resp = ui
+                .horizontal(|ui| {
+                    ui.label(RichText::new(git::short(&c.sha)).monospace().color(pal.muted));
+                    ui.label(RichText::new(&c.summary).color(pal.text));
+                })
+                .response
+                .on_hover_text(format!("{} · {}", c.author, abs_time(c.time)));
+            let _ = resp;
+        }
+    });
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        acts.push(Action::ClearPicked);
     }
 }
 
@@ -88,13 +124,9 @@ fn wip(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, sort_by_
                 p.rect_stroke(trash, CornerRadius::same(5), Stroke::new(1.0, col), egui::StrokeKind::Inside);
                 icons::paint(p, trash.shrink(6.0), Icon::Trash, col);
             }
-            if tr.on_hover_text("Discard all unstaged changes").clicked() && can_discard {
-                acts.push(Action::Dialog(Dialog::Confirm {
-                    title: "Discard all changes?".into(),
-                    body: format!("Every unstaged change ({} file(s)) will be lost, including new files. This can't be undone.", tab.snap.status.unstaged.len()),
-                    confirm: "Discard all".into(),
-                    then: Box::new(Action::DiscardMany(tab.snap.status.unstaged.clone())),
-                }));
+            // No confirmation: the files are saved first and the toast offers Undo (doc rule 4).
+            if tr.on_hover_text("Discard all unstaged changes (Undo brings them back)").clicked() && can_discard {
+                acts.push(Action::DiscardMany(tab.snap.status.unstaged.clone()));
             }
             // Title: "15 file changes on [branch]", centred, the branch pill cut with "…".
             let font = egui::FontId::proportional(14.5);
@@ -443,18 +475,12 @@ fn file_menu(resp: &egui::Response, group: &[FileChange], side: Option<Side>, pa
         }
         if side == Some(Side::Unstaged) {
             ui.separator();
-            if ui.button(RichText::new(format!("Discard changes ({what})")).color(pal.removed)).clicked() {
-                let body = if one {
-                    format!("Your changes to {} will be lost. This can't be undone.", files[0].path)
-                } else {
-                    format!("Your changes to {} files will be lost. This can't be undone.", files.len())
-                };
-                acts.push(Action::Dialog(Dialog::Confirm {
-                    title: "Discard changes?".into(),
-                    body,
-                    confirm: "Discard".into(),
-                    then: Box::new(Action::DiscardMany(files.clone())),
-                }));
+            if ui
+                .button(RichText::new(format!("Discard changes ({what})")).color(pal.removed))
+                .on_hover_text("The files are saved first: Undo brings them back.")
+                .clicked()
+            {
+                acts.push(Action::DiscardMany(files.clone()));
                 ui.close();
             }
         }
@@ -1120,12 +1146,7 @@ fn hunk_header(ui: &mut egui::Ui, rect: Rect, parsed: &ParsedDiff, hi: usize, so
                 acts.push(Action::Hunk { index: hi, mode: HunkMode::Stage });
             }
             if button(ui, RichText::new("Discard hunk").color(pal.removed), 92.0) {
-                acts.push(Action::Dialog(Dialog::Confirm {
-                    title: "Discard this hunk?".into(),
-                    body: "These lines will go back to how they were. This can't be undone.".into(),
-                    confirm: "Discard".into(),
-                    then: Box::new(Action::Hunk { index: hi, mode: HunkMode::Discard }),
-                }));
+                acts.push(Action::Hunk { index: hi, mode: HunkMode::Discard });
             }
         }
         DiffSource::Staged => {

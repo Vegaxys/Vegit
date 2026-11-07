@@ -178,17 +178,20 @@ pub fn app_icon(px: u32) -> egui::IconData {
 
 /// A toolbar button with the icon above its label, like a classic git client toolbar.
 pub fn tool_button(ui: &mut egui::Ui, icon: Icon, label: &str, enabled: bool, text: Color32, hover: Color32) -> egui::Response {
-    let size = vec2(52.0, 44.0);
+    let color = if enabled { text } else { text.gamma_multiply(0.35) };
+    let galley = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(10.5), color);
+    // 52 px like every other button, wider only for longer labels ("Undo rebase").
+    let size = vec2((galley.size().x + 14.0).max(52.0), 44.0);
+    // Disabled buttons still sense hover, so their tooltip can say why.
     let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
     let (rect, resp) = ui.allocate_exact_size(size, sense);
     let p = ui.painter();
     if enabled && resp.hovered() {
         p.rect_filled(rect, egui::CornerRadius::same(12), hover);
     }
-    let color = if enabled { text } else { text.gamma_multiply(0.35) };
     let icon_rect = Rect::from_center_size(pos2(rect.center().x, rect.top() + 14.0), vec2(18.0, 18.0));
     paint(p, icon_rect, icon, color);
-    p.text(pos2(rect.center().x, rect.bottom() - 9.0), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(10.5), color);
+    p.galley(pos2(rect.center().x - galley.size().x / 2.0, rect.bottom() - 9.0 - galley.size().y / 2.0), galley, color);
     resp
 }
 

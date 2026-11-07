@@ -151,6 +151,8 @@ pub struct Snapshot {
     pub remote_urls: Vec<(String, String)>,
     /// Who commits here (user.name / user.email, global and local).
     pub identity: Identity,
+    /// What happened lately (the reflog), in plain sentences, newest first.
+    pub activity: Vec<crate::safety::Activity>,
 }
 
 impl Snapshot {
@@ -223,6 +225,26 @@ pub fn run(dir: &Path, args: &[&str]) -> GitResult<String> {
             msg = format!("git {} failed", args.first().unwrap_or(&""));
         }
         Err(GitError(msg))
+    }
+}
+
+/// Like [`run`], with extra environment variables (a temporary index, an author for
+/// internal commits, later a sequence editor for interactive rebase).
+pub fn run_env(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> GitResult<String> {
+    let mut cmd = base_command(dir);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let out = cmd
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| GitError(format!("Could not start git ({e}). Is git installed and on PATH?")))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        Err(GitError(if msg.is_empty() { format!("git {} failed", args.first().unwrap_or(&"")) } else { msg }))
     }
 }
 
@@ -337,6 +359,7 @@ pub fn load_snapshot(dir: &Path) -> GitResult<Snapshot> {
     }
 
     snap.identity = identity(dir);
+    snap.activity = crate::safety::activity(dir, 60);
     snap.pending = if git_dir.join("MERGE_HEAD").exists() {
         Some(PendingOp::Merge)
     } else if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
@@ -937,6 +960,7 @@ pub fn merge_args(mode: MergeMode, source: &str) -> Vec<String> {
 
 /// Commit message for a squash: a summary, and the list of the commits it combines.
 pub fn squash_message(dir: &Path, source: &str, target: &str) -> (String, String) {
-    let list = run(dir, &["log", "--reverse", "--format=- %s", &format!("HEAD..{source}")]).unwrap_or_default();
+    // From the target branch rather than HEAD: a drag-and-drop merge switches to it first.
+    let list = run(dir, &["log", "--reverse", "--format=- %s", &format!("{target}..{source}")]).unwrap_or_default();
     (format!("Bring {source} into {target}"), list.trim_end().to_string())
 }

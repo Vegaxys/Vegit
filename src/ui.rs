@@ -30,6 +30,15 @@ impl eframe::App for VegitApp {
         if ui.input(|i| i.key_pressed(egui::Key::F5)) {
             self.actions.push(Action::Refresh);
         }
+        // Ctrl+Z / Ctrl+Y (and Ctrl+Shift+Z), unless a text field or a dialog has the keys.
+        if self.dialog.is_none() && !ctx.egui_wants_keyboard_input() {
+            let (z, y, shift) = ctx.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::Z), i.modifiers.command && i.key_pressed(egui::Key::Y), i.modifiers.shift));
+            if z && !shift {
+                self.actions.push(Action::UndoLast);
+            } else if y || (z && shift) {
+                self.actions.push(Action::Redo);
+            }
+        }
         let window = ui.max_rect();
         if ctx.input(|i| i.key_pressed(egui::Key::F9)) {
             self.shuffle_backdrop();
@@ -59,6 +68,14 @@ impl eframe::App for VegitApp {
 
         self.dialogs(&ctx, &pal);
         self.toasts_ui(&ctx, &pal);
+        // Branch drag and drop: the dragged name follows the pointer; after a drop, its menu.
+        crate::ui_quick::drag_ghost(&ctx, &pal);
+        if let Some(menu) = self.drop_menu.clone() {
+            let local = self.tabs.get(self.active).is_some_and(|t| t.snap.refs.iter().any(|r| r.kind == RefKind::Local && r.name == menu.source));
+            let mut acts = Vec::new();
+            crate::ui_quick::drop_menu(&ctx, &menu, local, &pal, &mut acts);
+            self.actions.extend(acts);
+        }
         if !maximized {
             // Without the system frame, a thin theme-coloured outline marks the window edge.
             ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("window_outline")))
@@ -284,17 +301,23 @@ impl VegitApp {
                         // Actions: icons above labels, like a classic git toolbar.
                         ui.spacing_mut().item_spacing.x = 1.0;
                         let has_head = tab.snap.head_sha.is_some();
-                        let can_redo = tab.redo.as_ref().is_some_and(|(_, parent)| tab.snap.head_sha.as_ref() == Some(parent));
                         let tb = |ui: &mut egui::Ui, icon: Icon, label: &str, on: bool| icons::tool_button(ui, icon, label, on, pal.text, pal.hover);
-                        if tb(ui, Icon::Undo, "Undo", has_head && !busy).on_hover_text("Undo the last commit and keep its changes staged").clicked() {
-                            acts.push(Action::Dialog(Dialog::Confirm {
-                                title: "Undo the last commit?".into(),
-                                body: "The commit is removed from the branch and its changes go back to the staging area. Avoid this if you already pushed it.".into(),
-                                confirm: "Undo commit".into(),
-                                then: Box::new(Action::UndoLastCommit),
-                            }));
+                        // Undo names what it takes back; with nothing recorded it can still undo
+                        // the last commit. A pushed action is greyed with the reason.
+                        let (undo_label, undo_on, undo_tip) = match tab.undo.last() {
+                            Some(e) if e.pushed => (format!("Undo {}", e.what), false, "Already on the server: undoing would need a force push.".to_string()),
+                            Some(e) => (format!("Undo {}", e.what), true, format!("Take back the last {} (Ctrl+Z)", e.what)),
+                            None => {
+                                let pushed = tab.snap.current_ref().is_some_and(|r| r.upstream.is_some() && r.ahead == 0);
+                                let tip = if pushed { "The last commit is already on the server: undoing would need a force push." } else { "Undo the last commit; its changes go back to the staging area (Ctrl+Z)" };
+                                ("Undo".to_string(), has_head && !pushed, tip.to_string())
+                            }
+                        };
+                        if tb(ui, Icon::Undo, &undo_label, undo_on && !busy).on_hover_text(undo_tip).clicked() {
+                            acts.push(Action::UndoLast);
                         }
-                        if tb(ui, Icon::Redo, "Redo", can_redo && !busy).on_hover_text("Bring back the commit you just undid").clicked() {
+                        let redo_label = tab.redo.last().map_or("Redo".to_string(), |e| format!("Redo {}", e.what));
+                        if tb(ui, Icon::Redo, &redo_label, !tab.redo.is_empty() && !busy).on_hover_text("Bring back what Undo took back (Ctrl+Y)").clicked() {
                             acts.push(Action::Redo);
                         }
                         if tb(ui, Icon::Fetch, "Fetch", !busy).on_hover_text("Download what's new from all remotes").clicked() {

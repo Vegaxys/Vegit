@@ -399,3 +399,223 @@ fn merge_options_squash_no_ff_and_ff_only() {
     assert!(git::run(&dir, &refs).is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Phase 2 "foundations": the safety net (record, undo, backups, reflog in words) and the
+// environment variables of git commands.
+// ---------------------------------------------------------------------------------------------
+
+use crate::safety::{self, ResetMode, Step};
+
+/// A repository with `main` at "first".
+fn repo_one_commit(name: &str) -> PathBuf {
+    let dir = temp_repo(name);
+    write(&dir, "a.txt", "one\n");
+    g(&dir, &["add", "."]);
+    g(&dir, &["commit", "-q", "-m", "first"]);
+    dir
+}
+
+fn args(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+/// Runs a command the way the worker does (recorded) and returns how to undo it.
+fn recorded(dir: &Path, v: &[&str]) -> safety::UndoEntry {
+    let a = args(v);
+    let (result, entry) = safety::run_recorded(dir, &[Step::Git(a.clone())], safety::describe(&a));
+    result.unwrap();
+    entry.expect("the command is recorded")
+}
+
+/// Runs an undo (recorded too, which is what Redo uses).
+fn undo(dir: &Path, e: &safety::UndoEntry) -> Option<safety::UndoEntry> {
+    let (result, redo) = safety::run_recorded(dir, &e.steps, Some((e.what.clone(), e.mode)));
+    result.unwrap();
+    redo
+}
+
+fn head(dir: &Path) -> String {
+    g(dir, &["rev-parse", "HEAD"]).trim().to_string()
+}
+
+fn text(dir: &Path, file: &str) -> String {
+    std::fs::read_to_string(dir.join(file)).unwrap().replace("\r\n", "\n")
+}
+
+/// Extra environment variables reach git (used by backups, later by interactive rebase).
+#[test]
+fn environment_variables_reach_git() {
+    let dir = repo_one_commit("env");
+    let ident = git::run_env(&dir, &["var", "GIT_AUTHOR_IDENT"], &[("GIT_AUTHOR_NAME", "Somebody Else"), ("GIT_AUTHOR_EMAIL", "else@example.com")]).unwrap();
+    assert!(ident.starts_with("Somebody Else <else@example.com>"), "{ident}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Undoing a commit puts the branch back with its changes staged; Redo brings the commit back.
+#[test]
+fn undo_commit_keeps_changes_staged_and_redo_restores_it() {
+    let dir = repo_one_commit("undocommit");
+    let first = head(&dir);
+    write(&dir, "a.txt", "two\n");
+    g(&dir, &["add", "."]);
+    let e = recorded(&dir, &["commit", "-q", "-m", "second"]);
+    let second = head(&dir);
+    assert_eq!(e.what, "commit");
+    assert_eq!(e.branches, vec!["main".to_string()]);
+    let redo = undo(&dir, &e).expect("the undo is recorded for Redo");
+    assert_eq!(head(&dir), first);
+    assert!(g(&dir, &["diff", "--cached", "--name-only"]).contains("a.txt"), "the change is staged again");
+    undo(&dir, &redo);
+    assert_eq!(head(&dir), second);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Deleting, renaming and creating-and-switching branches are all taken back.
+#[test]
+fn branch_delete_rename_and_create_are_undone() {
+    let dir = repo_one_commit("undobranch");
+    g(&dir, &["branch", "feature"]);
+    let tip = head(&dir);
+
+    let e = recorded(&dir, &["branch", "-D", "feature"]);
+    assert_eq!(e.what, "delete branch");
+    undo(&dir, &e);
+    assert_eq!(git::branch_sha(&dir, "feature").unwrap(), tip);
+
+    let e = recorded(&dir, &["branch", "-m", "main", "trunk"]);
+    undo(&dir, &e);
+    assert_eq!(g(&dir, &["symbolic-ref", "--short", "HEAD"]).trim(), "main");
+    assert!(git::branch_sha(&dir, "trunk").is_err());
+
+    let e = recorded(&dir, &["switch", "-q", "-c", "new-idea"]);
+    assert_eq!(e.what, "create branch");
+    undo(&dir, &e);
+    assert_eq!(g(&dir, &["symbolic-ref", "--short", "HEAD"]).trim(), "main");
+    assert!(git::branch_sha(&dir, "new-idea").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A discard saves the files first (tracked and new ones) under refs/vegit/backups, and its
+/// undo writes them back without touching the staging area.
+#[test]
+fn discarded_files_are_backed_up_and_restored() {
+    let dir = repo_one_commit("undodiscard");
+    write(&dir, "a.txt", "my precious edit\n");
+    write(&dir, "new.txt", "a brand new file\n");
+    let steps = vec![
+        Step::Backup(vec!["new.txt".into()]),
+        Step::Delete("new.txt".into()),
+        Step::Git(args(&["restore", "--worktree", "--", "a.txt"])),
+    ];
+    let (result, entry) = safety::run_recorded(&dir, &steps, Some(("discard (2 files)".into(), ResetMode::Keep)));
+    result.unwrap();
+    assert_eq!(text(&dir, "a.txt"), "one\n");
+    assert!(!dir.join("new.txt").exists());
+    assert_eq!(g(&dir, &["for-each-ref", "refs/vegit/backups"]).lines().count(), 2, "one backup per saving step");
+    undo(&dir, &entry.expect("recorded"));
+    assert_eq!(text(&dir, "a.txt"), "my precious edit\n");
+    assert_eq!(text(&dir, "new.txt"), "a brand new file\n");
+    assert!(g(&dir, &["diff", "--cached", "--name-only"]).trim().is_empty(), "the staging area is untouched");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `reset --hard` no longer loses anything: the branch and the uncommitted changes come back.
+#[test]
+fn hard_reset_is_undone_with_its_uncommitted_changes() {
+    let dir = repo_one_commit("undohard");
+    let first = head(&dir);
+    write(&dir, "a.txt", "two\n");
+    g(&dir, &["commit", "-q", "-am", "second"]);
+    let second = head(&dir);
+    write(&dir, "a.txt", "work in progress\n");
+    let e = recorded(&dir, &["reset", "-q", "--hard", &first]);
+    assert_eq!(e.mode, ResetMode::Hard);
+    assert_eq!(head(&dir), first);
+    undo(&dir, &e);
+    assert_eq!(head(&dir), second);
+    assert_eq!(text(&dir, "a.txt"), "work in progress\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A drag-and-drop merge into another branch (switch, then merge) is one action: its undo
+/// goes back to the first branch and puts the target where it was.
+#[test]
+fn merge_into_another_branch_is_undone_in_one_step() {
+    let dir = repo_one_commit("undomergeinto");
+    let first = head(&dir);
+    g(&dir, &["switch", "-q", "-c", "feature"]);
+    write(&dir, "b.txt", "b\n");
+    g(&dir, &["add", "."]);
+    g(&dir, &["commit", "-q", "-m", "add b"]);
+    let steps = vec![Step::Git(args(&["switch", "-q", "main"])), Step::Git(git::merge_args(git::MergeMode::NoFastForward, "feature"))];
+    let (result, entry) = safety::run_recorded(&dir, &steps, Some(("merge".into(), ResetMode::Keep)));
+    result.unwrap();
+    assert_ne!(git::branch_sha(&dir, "main").unwrap(), first);
+    undo(&dir, &entry.expect("recorded"));
+    assert_eq!(g(&dir, &["symbolic-ref", "--short", "HEAD"]).trim(), "feature");
+    assert_eq!(git::branch_sha(&dir, "main").unwrap(), first);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Deleting a stash and stashing are both undone.
+#[test]
+fn stash_drop_and_push_are_undone() {
+    let dir = repo_one_commit("undostash");
+    write(&dir, "a.txt", "stashed\n");
+    g(&dir, &["stash", "push", "-q", "-m", "keep me"]);
+    let e = recorded(&dir, &["stash", "drop", "-q"]);
+    assert!(g(&dir, &["stash", "list"]).trim().is_empty());
+    undo(&dir, &e);
+    assert!(g(&dir, &["stash", "list"]).contains("keep me"));
+
+    g(&dir, &["stash", "pop", "-q"]);
+    let e = recorded(&dir, &["stash", "push", "-q", "-m", "oops"]);
+    undo(&dir, &e);
+    assert!(g(&dir, &["stash", "list"]).trim().is_empty());
+    assert_eq!(text(&dir, "a.txt"), "stashed\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Staging and configuration are not recorded; aborts and continues neither.
+#[test]
+fn only_actions_worth_taking_back_are_recorded() {
+    for v in [&["add", "--", "a.txt"][..], &["reset", "-q"], &["config", "user.name", "x"], &["rebase", "--abort"], &["merge", "--continue"], &["apply", "--cached", "-"]] {
+        assert!(safety::describe(&args(v)).is_none(), "{v:?}");
+    }
+    assert_eq!(safety::describe(&args(&["commit", "--amend", "--no-edit"])).unwrap().0, "amend");
+    assert_eq!(safety::describe(&args(&["reset", "--hard", "HEAD~1"])).unwrap().1, ResetMode::Hard);
+}
+
+/// Old backups are deleted, recent ones kept.
+#[test]
+fn backups_older_than_thirty_days_are_purged() {
+    let dir = repo_one_commit("purge");
+    let tip = head(&dir);
+    g(&dir, &["update-ref", "refs/vegit/backups/1000-1", &tip]);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    g(&dir, &["update-ref", &format!("refs/vegit/backups/{now}-1"), &tip]);
+    safety::purge_backups(&dir, safety::BACKUP_DAYS);
+    let left = g(&dir, &["for-each-ref", "--format=%(refname)", "refs/vegit/backups"]);
+    assert_eq!(left.trim(), format!("refs/vegit/backups/{now}-1"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The reflog in plain words, without the in-between steps of a rebase.
+#[test]
+fn reflog_reads_as_sentences() {
+    assert_eq!(safety::translate("commit: Fix the login").as_deref(), Some("Committed: Fix the login"));
+    assert_eq!(safety::translate("checkout: moving from main to feature").as_deref(), Some("Switched from main to feature"));
+    assert_eq!(safety::translate("rebase (finish): returning to refs/heads/feature").as_deref(), Some("Replayed feature on its new base"));
+    assert_eq!(safety::translate("rebase (pick): Fix the login"), None);
+    assert_eq!(safety::translate("merge feature: Fast-forward").as_deref(), Some("Brought feature in (fast-forward)"));
+    assert_eq!(safety::translate(&format!("reset: moving to {}", "a".repeat(40))).as_deref(), Some("Moved the branch to aaaaaaa"));
+
+    let dir = repo_one_commit("activity");
+    g(&dir, &["switch", "-q", "-c", "feature"]);
+    let act = safety::activity(&dir, 10);
+    assert_eq!(act[0].text, "Switched from main to feature");
+    assert_eq!(act[1].text, "First commit: first");
+    assert!(act[0].time > 1_600_000_000);
+    let _ = std::fs::remove_dir_all(&dir);
+}

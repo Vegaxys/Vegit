@@ -128,7 +128,22 @@ pub fn snapshot() -> Snapshot {
             effective_name: Some("Alex Martin".into()),
             effective_email: Some("alex@example.com".into()),
         },
+        activity: activity(),
     }
+}
+
+/// Made-up recent events for the Activity panel of the sample.
+fn activity() -> Vec<crate::safety::Activity> {
+    let base = 1_793_000_000i64;
+    let a = |k: u32, mins: i64, text: &str| crate::safety::Activity { sha: sha(k), time: base - mins * 60, text: text.into() };
+    vec![
+        a(30, 5, "Committed: Polish empty state of the search panel"),
+        a(29, 42, "Brought feature/search in"),
+        a(25, 130, "Switched from release/1.4 to main"),
+        a(25, 180, "Moved the branch to 736ae24"),
+        a(22, 300, "Replayed feature/login on its new base"),
+        a(15, 1500, "Committed: Release 1.3.0"),
+    ]
 }
 
 pub fn files_for(_sha: &str) -> Vec<FileChange> {

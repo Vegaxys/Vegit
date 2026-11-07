@@ -17,6 +17,7 @@ mod git;
 mod graph;
 mod icons;
 mod preview;
+mod safety;
 #[cfg(test)]
 mod tests;
 mod theme;

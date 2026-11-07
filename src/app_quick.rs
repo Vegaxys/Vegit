@@ -122,7 +122,7 @@ impl VegitApp {
                     break;
                 }
             }
-            let _ = tx.send(JobDone::Op { tab_path: dir, label, ok_text, result, kind, from_worker: false });
+            let _ = tx.send(JobDone::Op { tab_path: dir, label, ok_text, result, kind, from_worker: false, journal: None });
             ctx2.request_repaint();
         });
     }
@@ -176,10 +176,10 @@ impl VegitApp {
         }
     }
 
-    /// Deletes a branch without asking: its tip is kept in the toast's Undo.
-    fn force_delete(&mut self, ctx: &egui::Context, name: String, sha: String) {
-        let undo = Action::Git { label: format!("Branch {name} restored"), args: vec!["branch".into(), name.clone(), sha], background: false };
-        self.queue_git(ctx, Some(format!("Deleted {name}")), vec!["branch".into(), "-D".into(), name], None, OpKind::Offer("Undo".into(), Box::new(undo)));
+    /// Deletes a branch without asking: the safety net records its tip, so the toast's Undo
+    /// recreates it.
+    fn force_delete(&mut self, ctx: &egui::Context, name: String, _sha: String) {
+        self.queue_git(ctx, Some(format!("Deleted {name}")), vec!["branch".into(), "-D".into(), name], None, OpKind::Plain);
     }
 
     fn open_push_dialog(&mut self, ctx: &egui::Context) {
@@ -344,7 +344,7 @@ impl VegitApp {
                 let ok = Some(format!("Commits are now signed {} <{}> ({scope}).", name.trim(), email.trim()));
                 self.queue_git(ctx, ok, git::set_identity_args(global, "user.email", &email), None, OpKind::Plain);
             }
-            _ => {}
+            other => self.handle_safety(ctx, other),
         }
     }
 }

@@ -6,7 +6,7 @@
 
 use eframe::egui::{self, Color32, CornerRadius, RichText, Stroke};
 
-use crate::app::{Action, Dialog, PushForm, RemoteCheck, RemoteForm, RepoTab};
+use crate::app::{Action, Dialog, DraggedBranch, DropMenu, PushForm, RemoteCheck, RemoteForm, RepoTab};
 use crate::forge;
 use crate::git::{self, Identity, MergeMode};
 use crate::icons::{self, Icon};
@@ -296,6 +296,77 @@ pub fn merge_items(ui: &mut egui::Ui, source: &str, label: &str, cur: &str, acts
             ui.close();
         }
     });
+}
+
+/// Makes a branch row or label draggable (its response must sense drags).
+pub fn drag_branch(resp: &egui::Response, name: &str) {
+    resp.dnd_set_drag_payload(DraggedBranch(name.to_string()));
+}
+
+/// A local branch as a drop target: highlights while another branch is dragged over it,
+/// and on release opens the menu of what to do (doc: "Glisser une branche sur une autre").
+pub fn drop_on_branch(ui: &egui::Ui, resp: &egui::Response, target: &str, pal: &Palette, acts: &mut Vec<Action>) {
+    if resp.dnd_hover_payload::<DraggedBranch>().is_some_and(|p| p.0 != target) {
+        ui.painter().rect_stroke(resp.rect, CornerRadius::same(6), Stroke::new(2.0, pal.accent), egui::StrokeKind::Inside);
+    }
+    if let Some(p) = resp.dnd_release_payload::<DraggedBranch>() {
+        if p.0 != target {
+            acts.push(Action::OpenDropMenu { source: p.0.clone(), target: target.to_string() });
+        }
+    }
+}
+
+/// The menu after a drop: the same phrases as the branch menus (phase 1), with the dropped
+/// branch as the source and the one under it as the target.
+pub fn drop_menu(ctx: &egui::Context, menu: &DropMenu, is_local_source: bool, pal: &Palette, acts: &mut Vec<Action>) {
+    let (s, t) = (menu.source.as_str(), menu.target.as_str());
+    let area = egui::Area::new(egui::Id::unique("drop_menu")).order(egui::Order::Foreground).fixed_pos(menu.pos).show(ctx, |ui| {
+        egui::Frame::menu(ui.style()).show(ui, |ui| {
+            crate::util::menu_pad(ui);
+            ui.set_min_width(260.0);
+            ui.label(RichText::new(format!("{s}  →  {t}")).color(pal.muted));
+            let mut pick = |ui: &mut egui::Ui, text: String, tip: String, action: Action| {
+                if ui.button(text).on_hover_text(tip).clicked() {
+                    acts.push(action);
+                    acts.push(Action::CloseDropMenu);
+                }
+            };
+            let merge = |mode| Action::MergeInto { source: s.to_string(), target: t.to_string(), mode };
+            pick(ui, format!("Bring {s} into {t}"), format!("git merge {s} (on {t})"), merge(MergeMode::Normal));
+            pick(ui, format!("Bring {s} into {t} as one commit"), format!("git merge --squash {s} (on {t})\nThe commit message lists the combined commits."), merge(MergeMode::Squash));
+            if is_local_source {
+                let replay = Action::Git { label: format!("Replayed {s} on top of {t}"), args: vec!["rebase".into(), t.to_string(), s.to_string()], background: false };
+                pick(ui, format!("Replay {s} on top of {t}"), format!("git rebase {t} {s}"), replay);
+            }
+            ui.menu_button("More options", |ui| {
+                crate::util::menu_pad(ui);
+                pick(ui, "Always create a merge commit".into(), format!("git merge --no-ff {s}"), merge(MergeMode::NoFastForward));
+                pick(ui, "Only if no merge commit is needed".into(), format!("git merge --ff-only {s}"), merge(MergeMode::FastForwardOnly));
+            });
+            ui.separator();
+            if ui.button("Cancel").clicked() {
+                acts.push(Action::CloseDropMenu);
+            }
+        });
+    });
+    // A click elsewhere or Escape closes it, like any menu.
+    // (Not while its "More options" submenu is open: that click lands in the submenu.)
+    let outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p)));
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) || (outside && !egui::Popup::is_any_open(ctx)) {
+        acts.push(Action::CloseDropMenu);
+    }
+}
+
+/// While a branch is dragged: its name follows the pointer.
+pub fn drag_ghost(ctx: &egui::Context, pal: &Palette) {
+    let Some(p) = egui::DragAndDrop::payload::<DraggedBranch>(ctx) else { return };
+    let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else { return };
+    egui::Area::new(egui::Id::unique("drag_ghost")).order(egui::Order::Tooltip).fixed_pos(pos + egui::vec2(14.0, 8.0)).interactable(false).show(ctx, |ui| {
+        egui::Frame::new().fill(pal.accent).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::symmetric(8, 3)).show(ui, |ui| {
+            ui.label(RichText::new(&p.0).color(Color32::WHITE).size(12.0));
+        });
+    });
+    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
 }
 
 /// Right-click menu of a remote's sidebar header.

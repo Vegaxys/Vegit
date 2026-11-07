@@ -23,10 +23,13 @@ use crate::diff::{DiffMode, ParsedDiff};
 use crate::git::{self, Commit, DiffSource, FileChange, FileState, Snapshot};
 use crate::graph::{self, GraphLayout};
 use crate::preview;
+use crate::safety::{self, ResetMode, Step, UndoEntry};
 use crate::theme::{self, Appearance, LaneMode, Palette, ThemeChoice};
 
 #[path = "app_quick.rs"]
 mod quick;
+#[path = "app_safety.rs"]
+mod safety_net;
 pub use quick::{PushForm, RemoteCheck, RemoteForm};
 
 pub const SETTINGS_KEY: &str = "vegit_settings";
@@ -228,8 +231,12 @@ pub struct RepoTab {
     /// After a commit, show the new commit once the reload lands.
     select_head_after_reload: bool,
     pub collapsed: [HashSet<String>; 3],
-    /// Commit removed by Undo and the commit it left HEAD on, so Redo can bring it back.
-    pub redo: Option<(String, String)>,
+    /// Actions that Undo takes back, the last one on top (the safety net).
+    pub undo: Vec<UndoEntry>,
+    /// What Redo brings back, the last undone on top.
+    pub redo: Vec<UndoEntry>,
+    /// Commits picked with Ctrl+click / Shift+click in the graph, in the order picked.
+    pub picked_commits: Vec<String>,
     pub file_view: Option<FileView>,
     /// Files picked in the working-changes lists (Ctrl/Shift+click), all in one list.
     pub picked: HashSet<String>,
@@ -282,7 +289,9 @@ impl RepoTab {
             fingerprint: String::new(),
             select_head_after_reload: false,
             collapsed: Default::default(),
-            redo: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            picked_commits: Vec::new(),
             file_view: None,
             picked: HashSet::new(),
             picked_list: ListId::Unstaged,
@@ -464,7 +473,10 @@ pub enum Action {
     Pull(PullMode),
     Push { force: bool },
     Fetch,
-    UndoLastCommit,
+    /// Takes back the last recorded action (toolbar Undo, Ctrl+Z).
+    UndoLast,
+    /// Undo from a toast: only if that action is still the last one.
+    UndoId(u64),
     OpenRepo(PathBuf),
     OpenSample,
     InitRepo(PathBuf),
@@ -526,6 +538,14 @@ pub enum Action {
     ForceDeleteBranch { name: String, sha: String },
     Merge { source: String, mode: git::MergeMode },
     SetIdentity { global: bool, name: String, email: String },
+    // Foundations (app_safety.rs): drag and drop, multi-selection.
+    /// Brings `source` into `target`, switching to `target` first when needed.
+    MergeInto { source: String, target: String, mode: git::MergeMode },
+    OpenDropMenu { source: String, target: String },
+    CloseDropMenu,
+    /// Ctrl+click (`toggle`) or Shift+click (`range`) on a graph row.
+    PickCommit { sha: String, toggle: bool, range: bool },
+    ClearPicked,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -561,7 +581,6 @@ enum OpKind {
 /// Work for the worker thread, processed strictly in order.
 enum Task {
     Run { repo: PathBuf, label: String, ok_text: Option<String>, args: Vec<String>, input: Option<String>, kind: OpKind },
-    Delete { repo: PathBuf, rel: String },
     Reload { repo: PathBuf },
     Diff { repo: PathBuf, source: DiffSource, file: FileChange, token: u64, whole: bool },
     Detail { repo: PathBuf, commit: Commit },
@@ -570,11 +589,24 @@ enum Task {
     Blame { repo: PathBuf, path: String },
     /// What deleting a branch would lose.
     BranchCheck { repo: PathBuf, name: String },
+    /// Several steps run as one action, recorded for Undo when `what` is given.
+    Steps { repo: PathBuf, label: String, ok_text: Option<String>, steps: Vec<Step>, what: Option<(String, ResetMode)>, kind: OpKind, role: Role },
+}
+
+/// Where a recorded action goes once it has run.
+#[derive(Clone, Debug)]
+enum Role {
+    /// A new action: onto the Undo stack (and Redo is cleared).
+    New,
+    /// An undo: what it recorded goes onto the Redo stack. Holds the entry it undid.
+    Undone(Option<Box<UndoEntry>>),
+    /// A redo: back onto the Undo stack.
+    Redone,
 }
 
 /// Result of work done off the window thread.
 enum JobDone {
-    Op { tab_path: PathBuf, label: String, ok_text: Option<String>, result: Result<String, String>, kind: OpKind, from_worker: bool },
+    Op { tab_path: PathBuf, label: String, ok_text: Option<String>, result: Result<String, String>, kind: OpKind, from_worker: bool, journal: Option<(UndoEntry, Role)> },
     Snapshot { tab_path: PathBuf, result: Result<(Snapshot, GraphLayout), String> },
     Diff { tab_path: PathBuf, token: u64, parsed: ParsedDiff },
     Detail { tab_path: PathBuf, detail: CommitDetail },
@@ -629,7 +661,23 @@ pub struct VegitApp {
     /// This launch's random graphic, gradient and noise seed, used while the setting is "Random".
     pub backdrop_pick: (crate::backdrop::Graphic, crate::backdrop::Gradient, u64),
     next_token: u64,
+    /// Last id given to an Undo entry.
+    next_undo_id: u64,
+    /// The menu shown after a branch was dropped on another one.
+    pub drop_menu: Option<DropMenu>,
 }
+
+/// A branch dragged onto another one: what to do with it.
+#[derive(Clone, Debug)]
+pub struct DropMenu {
+    pub source: String,
+    pub target: String,
+    pub pos: egui::Pos2,
+}
+
+/// Drag-and-drop payload: the name of the dragged branch (local, or `origin/x`).
+#[derive(Clone, Debug)]
+pub struct DraggedBranch(pub String);
 
 impl VegitApp {
     pub fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<PathBuf>) -> Self {
@@ -669,6 +717,8 @@ impl VegitApp {
             applied_theme: None,
             backdrop_pick: crate::backdrop::launch_pick(),
             next_token: 0,
+            next_undo_id: 0,
+            drop_menu: None,
         };
 
         if app.screenshot.is_some() {
@@ -763,6 +813,16 @@ impl VegitApp {
                     }
                     "identity" => t.snap.identity = git::Identity::default(),
                     "rebase" => t.snap.pending = Some(git::PendingOp::Rebase),
+                    "undo" => {
+                        t.undo.push(UndoEntry { id: 1, what: "rebase".into(), mode: ResetMode::Keep, steps: Vec::new(), forward: Vec::new(), branches: vec!["main".into()], pushed: false });
+                        t.redo.push(UndoEntry { id: 0, what: "discard (3 files)".into(), mode: ResetMode::Keep, steps: Vec::new(), forward: Vec::new(), branches: Vec::new(), pushed: false });
+                    }
+                    "picked" => {
+                        t.picked_commits = t.snap.commits.iter().skip(2).take(3).map(|c| c.sha.clone()).collect();
+                    }
+                    "drop" => {
+                        app.drop_menu = Some(DropMenu { source: "feature/search".into(), target: "main".into(), pos: egui::pos2(420.0, 330.0) });
+                    }
                     "toast" => {
                         let undo = Action::Git { label: String::new(), args: Vec::new(), background: false };
                         app.toasts.push(Toast { text: "Deleted feature/old-login".into(), kind: ToastKind::Success, until: 1e9, action: Some(("Undo".into(), undo)) });
@@ -946,10 +1006,12 @@ impl VegitApp {
         let tx = self.jobs_tx.clone();
         let ctx2 = ctx.clone();
         std::thread::spawn(move || {
-            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            let result = git::run(&dir, &refs).map_err(|e| e.0);
+            // A pull moves the local branch: recorded for Undo like local actions.
+            let what = (label == "Pull").then(|| safety::describe(&args)).flatten();
+            let (result, entry) = safety::run_recorded(&dir, &[Step::Git(args)], what);
             let ok_text = Some(format!("{label}: done"));
-            let _ = tx.send(JobDone::Op { tab_path: dir, label, ok_text, result, kind: OpKind::Plain, from_worker: false });
+            let journal = entry.map(|e| (e, Role::New));
+            let _ = tx.send(JobDone::Op { tab_path: dir, label, ok_text, result, kind: OpKind::Plain, from_worker: false, journal });
             ctx2.request_repaint();
         });
     }
@@ -958,7 +1020,7 @@ impl VegitApp {
     pub fn pump_jobs(&mut self, ctx: &egui::Context) {
         while let Ok(done) = self.jobs_rx.try_recv() {
             match done {
-                JobDone::Op { tab_path, label, ok_text, result, kind, from_worker } => {
+                JobDone::Op { tab_path, label, ok_text, result, kind, from_worker, journal } => {
                     if from_worker {
                         self.pending = self.pending.saturating_sub(1);
                     } else {
@@ -966,11 +1028,24 @@ impl VegitApp {
                     }
                     match result {
                         Ok(_) => {
+                            // The toast offers the follow-up of the action, else its Undo (or Redo).
+                            let offer = match (&kind, &journal) {
+                                (OpKind::Offer(button, then), _) => Some((button.clone(), (**then).clone())),
+                                (_, Some((_, Role::Undone(_)))) => Some(("Redo".to_string(), Action::Redo)),
+                                (_, Some(_)) => Some(("Undo".to_string(), Action::UndoId(self.next_undo_id + 1))),
+                                _ => None,
+                            };
                             if let Some(t) = ok_text {
-                                match &kind {
-                                    OpKind::Offer(button, then) => self.toast_offer(ctx, t, ToastKind::Success, button.clone(), (**then).clone()),
-                                    _ => self.toast(ctx, t, ToastKind::Success),
+                                match offer {
+                                    Some((button, then)) => self.toast_offer(ctx, t, ToastKind::Success, button, then),
+                                    None => self.toast(ctx, t, ToastKind::Success),
                                 }
+                            }
+                            if let Some((entry, role)) = journal {
+                                self.record(&tab_path, entry, role);
+                            }
+                            if label == "Push" {
+                                self.mark_pushed(&tab_path);
                             }
                             self.after_op(ctx, &tab_path, &kind);
                             if matches!(kind, OpKind::Commit) {
@@ -1317,21 +1392,9 @@ impl VegitApp {
             }
             Action::Push { force } => self.push(ctx, force),
             Action::Fetch => self.git_background(ctx, "Fetch".into(), vec!["fetch".into(), "--all".into(), "--prune".into()]),
-            Action::UndoLastCommit => {
-                let redo = self.tab().and_then(|t| {
-                    let head = t.snap.head_sha.clone()?;
-                    let parent = t.commit(&head)?.parents.first()?.clone();
-                    Some((head, parent))
-                });
-                if let Some(t) = self.tab() {
-                    t.redo = redo;
-                }
-                self.queue(ctx, "Last commit undone; its changes are staged again (Redo brings it back)", &["reset", "--soft", "HEAD~1"]);
-            }
-            Action::Redo => {
-                let Some((sha, _)) = self.tab().and_then(|t| t.redo.take()) else { return };
-                self.queue(ctx, "Commit restored", &["reset", "--soft", &sha]);
-            }
+            Action::UndoLast => self.undo(ctx, None),
+            Action::UndoId(id) => self.undo(ctx, Some(id)),
+            Action::Redo => self.redo(ctx),
             Action::ToggleFolder(list, path) => {
                 if let Some(t) = self.tab() {
                     let set = &mut t.collapsed[list as usize];
@@ -1437,15 +1500,23 @@ impl VegitApp {
                     self.sample_refusal(ctx);
                     return;
                 };
+                // New files are saved before being deleted; tracked ones are saved by the
+                // `restore --worktree` step itself (safety::destroyed_paths). One Undo for all.
+                let n = files.len();
                 let (untracked, tracked): (Vec<_>, Vec<_>) = files.into_iter().partition(|f| f.state == FileState::Untracked);
-                for f in untracked {
-                    self.send(Task::Delete { repo: repo.clone(), rel: f.path });
+                let mut steps = Vec::new();
+                if !untracked.is_empty() {
+                    steps.push(Step::Backup(untracked.iter().map(|f| f.path.clone()).collect()));
+                    steps.extend(untracked.into_iter().map(|f| Step::Delete(f.path)));
                 }
                 for chunk in tracked.chunks(100) {
                     let mut args: Vec<String> = vec!["restore".into(), "--worktree".into(), "--".into()];
                     args.extend(chunk.iter().map(|f| f.path.clone()));
-                    self.send(Task::Run { repo: repo.clone(), label: "git restore".into(), ok_text: None, args, input: None, kind: OpKind::Plain });
+                    steps.push(Step::Git(args));
                 }
+                let what = if n == 1 { "discard".to_string() } else { format!("discard ({n} files)") };
+                let ok = Some(if n == 1 { "Change discarded".to_string() } else { format!("{n} files discarded") });
+                self.send(Task::Steps { repo: repo.clone(), label: "Discard".into(), ok_text: ok, steps, what: Some((what, ResetMode::Keep)), kind: OpKind::Plain, role: Role::New });
                 self.send(Task::Reload { repo });
                 if let Some(t) = self.tab() {
                     t.picked.clear();
@@ -1690,7 +1761,7 @@ impl VegitApp {
                     let home = dirs_home();
                     let result = git::run(&home, &["ls-remote", "--heads", &url]).map_err(|e| e.0);
                     let ok_text = Some(format!("Access works: you can clone {url}"));
-                    let _ = tx.send(JobDone::Op { tab_path: home, label, ok_text, result, kind: OpKind::Plain, from_worker: false });
+                    let _ = tx.send(JobDone::Op { tab_path: home, label, ok_text, result, kind: OpKind::Plain, from_worker: false, journal: None });
                     ctx2.request_repaint();
                 });
             }
@@ -1790,6 +1861,16 @@ impl VegitApp {
             return;
         }
         let Some(patch) = dv.parsed.as_ref().and_then(|p| p.hunk_patch(index)) else { return };
+        if mode == HunkMode::Discard {
+            // Save the file first so the toast's Undo can bring the lines back.
+            let path = dv.file.path.clone();
+            let Some(repo) = tab.path.clone() else { return };
+            let steps = vec![Step::Backup(vec![path]), Step::Input(vec!["apply".into(), "-R".into(), "--whitespace=nowarn".into(), "-".into()], patch)];
+            let what = Some(("discard change".to_string(), ResetMode::Keep));
+            self.send(Task::Steps { repo: repo.clone(), label: "Discard".into(), ok_text: Some("Change discarded".into()), steps, what, kind: OpKind::Plain, role: Role::New });
+            self.send(Task::Reload { repo });
+            return;
+        }
         let args: &[&str] = match mode {
             HunkMode::Stage => &["apply", "--cached", "--whitespace=nowarn", "-"],
             HunkMode::Unstage => &["apply", "--cached", "-R", "--whitespace=nowarn", "-"],
@@ -1869,17 +1950,29 @@ fn run_task(task: Task) -> JobDone {
                 }
                 k => k,
             };
-            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            let result = match input {
-                Some(i) => git::run_with_input(&repo, &refs, &i),
-                None => git::run(&repo, &refs),
-            }
-            .map_err(|e| e.0);
-            JobDone::Op { tab_path: repo, label, ok_text, result, kind, from_worker: true }
+            // Recorded for Undo when it is a command worth taking back (safety::describe).
+            let what = safety::describe(&args);
+            let step = match input {
+                Some(i) => Step::Input(args, i),
+                None => Step::Git(args),
+            };
+            let (result, entry) = safety::run_recorded(&repo, &[step], what);
+            JobDone::Op { tab_path: repo, label, ok_text, result, kind, from_worker: true, journal: entry.map(|e| (e, Role::New)) }
         }
-        Task::Delete { repo, rel } => {
-            let result = std::fs::remove_file(repo.join(&rel)).map(|_| String::new()).map_err(|e| format!("{rel}: {e}"));
-            JobDone::Op { tab_path: repo, label: "Delete".into(), ok_text: None, result, kind: OpKind::Plain, from_worker: true }
+        Task::Steps { repo, label, ok_text, steps, what, kind, role } => {
+            let kind = match kind {
+                OpKind::Squash { source, target } => {
+                    let (summary, body) = git::squash_message(&repo, &source, &target);
+                    OpKind::Squashed(summary, body)
+                }
+                k => k,
+            };
+            let (result, entry) = safety::run_recorded(&repo, &steps, what);
+            JobDone::Op { tab_path: repo, label, ok_text, result, kind, from_worker: true, journal: entry.map(|e| (e, role.clone())).or(match role {
+                // An undo that moved no ref (restoring files) still lets Redo replay the action.
+                Role::Undone(Some(ref orig)) if !orig.forward.is_empty() => Some((UndoEntry { steps: Vec::new(), ..*orig.clone() }, role)),
+                _ => None,
+            }) }
         }
         Task::Reload { repo } => {
             let result = git::load_snapshot(&repo)

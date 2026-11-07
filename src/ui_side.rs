@@ -207,12 +207,42 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
                         ui.close();
                     }
                     if ui.button(RichText::new("Delete stash").color(pal.removed)).clicked() {
-                        acts.push(Action::Dialog(Dialog::Confirm {
-                            title: "Delete this stash?".into(),
-                            body: "The saved changes will be lost.".into(),
-                            confirm: "Delete".into(),
-                            then: Box::new(Action::Git { label: "Stash deleted".into(), args: vec!["stash".into(), "drop".into(), r.clone()], background: false }),
-                        }));
+                        acts.push(Action::Git { label: "Stash deleted".into(), args: vec!["stash".into(), "drop".into(), r.clone()], background: false });
+                        ui.close();
+                    }
+                });
+            }
+        });
+
+        // Activity: the reflog in plain sentences, to find a lost state again.
+        let activity = &tab.snap.activity;
+        let title = format!("Activity  ({})", activity.len());
+        section_full(ui, "activity", Icon::Undo, &title, pal, false, |_, _| {}, |ui| {
+            if activity.is_empty() {
+                ui.label(RichText::new("Nothing yet").color(pal.muted));
+            }
+            for a in activity {
+                let when = crate::util::rel_time(a.time);
+                let text = RichText::new(format!("   {when} · {}", a.text)).color(pal.text2());
+                let resp = ui
+                    .add(egui::Button::selectable(false, text).frame_when_inactive(false).truncate())
+                    .on_hover_text(format!("{}\n{} · {}\nClick to show it · right-click to restore it as a new branch", a.text, crate::util::abs_time(a.time), crate::git::short(&a.sha)));
+                if resp.clicked() {
+                    acts.push(Action::SelectRef(a.sha.clone()));
+                }
+                let sha = a.sha.clone();
+                resp.context_menu(|ui| {
+                    crate::util::menu_pad(ui);
+                    if ui.button("Show").on_hover_text("Selects this commit in the graph").clicked() {
+                        acts.push(Action::SelectRef(sha.clone()));
+                        ui.close();
+                    }
+                    if ui.button("Restore as a new branch…").on_hover_text(format!("git branch <name> {}", crate::git::short(&sha))).clicked() {
+                        acts.push(Action::Dialog(Dialog::NewBranch { at: Some(sha.clone()), name: String::new(), checkout: false }));
+                        ui.close();
+                    }
+                    if ui.button("Copy commit SHA").clicked() {
+                        acts.push(Action::Copy(sha.clone()));
                         ui.close();
                     }
                 });
@@ -311,7 +341,12 @@ fn local_item(ui: &mut egui::Ui, tab: &RepoTab, i: usize, leaf: &str, pal: &Pale
         (Some(up), false) => format!("{}  ·  follows {up}\nClick to show in the graph · double-click to switch to it · right-click for more", r.name),
         (None, _) => format!("{}  ·  local only\nClick to show in the graph · double-click to switch to it · right-click for more", r.name),
     };
-    let resp = ui.add(egui::Button::selectable(false, atoms).frame_when_inactive(false).truncate()).on_hover_text(hover);
+    let resp = ui
+        .add(egui::Button::selectable(false, atoms).frame_when_inactive(false).truncate().sense(egui::Sense::click_and_drag()))
+        .on_hover_text(format!("{hover}\nDrag it onto another branch to merge or replay it"));
+    // Drag a branch onto another to bring it in or replay it there.
+    crate::ui_quick::drag_branch(&resp, &r.name);
+    crate::ui_quick::drop_on_branch(ui, &resp, &r.name, pal, acts);
     if resp.clicked() {
         acts.push(Action::SelectRef(r.target.clone()));
     }
@@ -396,8 +431,9 @@ fn remote_item(ui: &mut egui::Ui, tab: &RepoTab, i: usize, remote: &str, leaf: &
     let r = &tab.snap.refs[i];
     let short = r.name[remote.len() + 1..].to_string();
     let resp = ui
-        .add(egui::Button::selectable(false, RichText::new(format!("   {leaf}")).color(pal.text2())).frame_when_inactive(false).truncate())
-        .on_hover_text(format!("{}\nDouble-click to switch to it (as a local branch)", r.name));
+        .add(egui::Button::selectable(false, RichText::new(format!("   {leaf}")).color(pal.text2())).frame_when_inactive(false).truncate().sense(egui::Sense::click_and_drag()))
+        .on_hover_text(format!("{}\nDouble-click to switch to it (as a local branch) · drag it onto a local branch to bring it in", r.name));
+    crate::ui_quick::drag_branch(&resp, &r.name);
     if resp.clicked() {
         acts.push(Action::SelectRef(r.target.clone()));
     }
@@ -441,8 +477,22 @@ fn section(ui: &mut egui::Ui, id: &str, icon: Icon, title: &str, pal: &Palette, 
 /// [`section`] with extras in the header row: `header` gets the title's response (for a
 /// right-click menu) and the rest of the row (for buttons).
 fn section_with(ui: &mut egui::Ui, id: &str, icon: Icon, title: &str, pal: &Palette, header: impl FnOnce(&mut egui::Ui, &egui::Response), body: impl FnOnce(&mut egui::Ui)) {
+    section_full(ui, id, icon, title, pal, true, header, body);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn section_full(
+    ui: &mut egui::Ui,
+    id: &str,
+    icon: Icon,
+    title: &str,
+    pal: &Palette,
+    default_open: bool,
+    header: impl FnOnce(&mut egui::Ui, &egui::Response),
+    body: impl FnOnce(&mut egui::Ui),
+) {
     let state_id = ui.make_persistent_id(id);
-    let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), state_id, true);
+    let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), state_id, default_open);
     let header = ui.horizontal(|ui| {
         state.show_toggle_button(ui, chevron(pal.text2()));
         ui.add(icons::image(ui.ctx(), icon, 16.0, pal.text2()));
