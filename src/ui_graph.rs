@@ -216,6 +216,8 @@ pub fn show(
         let graph_col = cols_of(Rect::from_min_size(pos2(left, 0.0), vec2(content_w, 1.0)))[1];
         let x_of = |col: usize| graph_col.left() + 14.0 + col as f32 * lane_w;
 
+        // Branches open in another folder (worktrees), marked on their labels.
+        let folders = crate::ui_big::branch_folders(tab);
         // Pass 1: row backgrounds, text and interaction.
         for row in range.clone() {
             let (rect, resp) = ui.allocate_exact_size(vec2(content_w, ROW_H), Sense::click());
@@ -404,16 +406,29 @@ pub fn show(
                 if r.kind == RefKind::Local {
                     crate::ui_quick::drop_on_branch(ui, &pr, &r.name, pal, acts);
                 }
+                // A branch open in another folder: go there rather than fail (doc §Worktrees 3).
+                let elsewhere = folders.get(&r.name).cloned();
+                if elsewhere.is_some() {
+                    // A small folder badge on the label's top-right corner.
+                    let c = pos2(pr.rect.right() - 1.0, pr.rect.top() + 1.0);
+                    let p = painter.with_clip_rect(cols[0].expand2(vec2(0.0, 4.0)));
+                    p.circle_filled(c, 7.0, pal.panel);
+                    icons::paint(&p, Rect::from_center_size(c, vec2(10.0, 10.0)), Icon::Folder, pal.accent);
+                }
                 if pr.double_clicked() {
                     let r = &tab.snap.refs[i];
-                    acts.push(match r.kind {
-                        RefKind::Remote => Action::CheckoutRemote(r.name.clone()),
+                    acts.push(match (r.kind.clone(), elsewhere.clone()) {
+                        (RefKind::Local, Some(p)) => Action::OpenWorktree(p),
+                        (RefKind::Remote, _) => Action::CheckoutRemote(r.name.clone()),
                         _ => Action::CheckoutLocal(r.name.clone()),
                     });
                 } else if pr.clicked() {
                     acts.push(Action::Select(Selection::Commit(c.sha.clone())));
                 }
-                let pr = pr.on_hover_text("Double-click to switch to this branch · drag it onto another branch to merge or replay it");
+                let pr = match &elsewhere {
+                    Some(p) => pr.on_hover_text(format!("Open in another folder: {}\nDouble-click to go to its tab", p.display())),
+                    None => pr.on_hover_text("Double-click to switch to this branch · drag it onto another branch to merge or replay it"),
+                };
                 commit_menu(&pr, tab, &c.sha, Some(i), acts);
             }
             if let Some((br, list)) = badge_list {
@@ -717,6 +732,11 @@ pub fn commit_menu(resp: &egui::Response, tab: &RepoTab, sha: &str, on_ref: Opti
         if ui.button("Revert this commit").clicked() {
             acts.push(git_action(format!("Reverted {short}"), &["revert", "--no-edit", &sha]));
             ui.close();
+        }
+        // Edit message, combine, remove, move, Edit history (doc §Rebase interactif).
+        crate::ui_big::rewrite_menu(ui, tab, &sha, acts);
+        if let Some(b) = branch.as_ref().filter(|b| b.kind != RefKind::Tag) {
+            crate::ui_big::worktree_item(ui, tab, &b.name, b.kind.clone(), acts);
         }
         ui.menu_button("Reset current branch to here", |ui| {
             crate::util::menu_pad(ui);

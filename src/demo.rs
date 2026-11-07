@@ -129,6 +129,13 @@ pub fn snapshot() -> Snapshot {
             effective_email: Some("alex@example.com".into()),
         },
         activity: activity(),
+        // The sample has a second folder open on feature/login, and stores pictures with LFS.
+        worktrees: vec![
+            crate::worktree::Worktree { path: "C:/Projects/sample-project".into(), head: sha(30), branch: Some("main".into()), main: true, ..Default::default() },
+            crate::worktree::Worktree { path: "C:/Projects/sample-project-feature-login".into(), head: sha(28), branch: Some("feature/login".into()), changes: 2, ..Default::default() },
+        ],
+        pruned: 0,
+        lfs: crate::lfs::LfsInfo { used: true, installed: true, tracked: ["assets/empty-state.svg".to_string()].into_iter().collect(), unity: true },
     }
 }
 

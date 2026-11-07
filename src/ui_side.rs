@@ -189,8 +189,13 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
             }
         });
 
-        // Stashes
-        section(ui, "stashes", Icon::Box, &format!("Stashes  ({})", tab.snap.stashes.len()), pal, |ui| {
+        // Stashes (shared by every folder of the repository: say so).
+        let shared = |_: &mut egui::Ui, title: &egui::Response| {
+            if tab.snap.worktrees.len() > 1 {
+                let _ = title.clone().on_hover_text("Stashes are shared by every folder of this repository (worktrees).");
+            }
+        };
+        section_with(ui, "stashes", Icon::Box, &format!("Stashes  ({})", tab.snap.stashes.len()), pal, shared, |ui| {
             for s in &tab.snap.stashes {
                 let resp = ui
                     .add(egui::Button::selectable(false, RichText::new(format!("   {}", s.message)).color(pal.text2())).frame_when_inactive(false).truncate())
@@ -213,6 +218,19 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
                 });
             }
         });
+
+        // Worktrees: this repository's other folders, each a tab (doc §Worktrees 2).
+        let n = tab.snap.worktrees.len().max(1);
+        section(ui, "worktrees", Icon::Folder, &format!("Worktrees  ({n})"), pal, |ui| crate::ui_big::worktrees_body(ui, tab, pal, acts));
+
+        // Big files (Git LFS): locks and the Unity preset, when relevant.
+        if tab.snap.lfs.used || tab.snap.lfs.unity {
+            let locks = match &tab.lfs_locks {
+                Some(Ok(l)) => l.len().to_string(),
+                _ => "·".into(),
+            };
+            section(ui, "lfs", Icon::Box, &format!("Big files (LFS)  ({locks})"), pal, |ui| crate::ui_big::lfs_body(ui, tab, pal, acts));
+        }
 
         // Activity: the reflog in plain sentences, to find a lost state again.
         let activity = &tab.snap.activity;
@@ -391,6 +409,7 @@ fn local_item(ui: &mut egui::Ui, tab: &RepoTab, i: usize, leaf: &str, pal: &Pale
             acts.push(Action::OpenPullRequestForm(Some(name.clone())));
             ui.close();
         }
+        crate::ui_big::worktree_item(ui, tab, &name, RefKind::Local, acts);
         if ui.button("New branch from here…").clicked() {
             acts.push(Action::Dialog(Dialog::NewBranch { at: Some(name.clone()), name: String::new(), checkout: true }));
             ui.close();
@@ -450,6 +469,7 @@ fn remote_item(ui: &mut egui::Ui, tab: &RepoTab, i: usize, remote: &str, leaf: &
             ui.close();
         }
         crate::ui_quick::merge_items(ui, &full, &full, &current, acts);
+        crate::ui_big::worktree_item(ui, tab, &full, RefKind::Remote, acts);
         ui.separator();
         if ui.button("Copy name").clicked() {
             acts.push(Action::Copy(short.clone()));

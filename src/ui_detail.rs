@@ -19,6 +19,9 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, sor
         loading(ui, "Reading the repository…");
         return;
     }
+    if tab.history_edit.is_some() {
+        return crate::ui_big::history_panel(ui, tab, pal, acts);
+    }
     if tab.picked_commits.len() > 1 {
         return picked(ui, tab, pal, acts);
     }
@@ -308,6 +311,7 @@ fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool,
     };
     let open = tab.diff.as_ref().map(|d| (d.source.clone(), d.file.path.clone()));
     let picked_here = tab.picked_list == list;
+    let locks = crate::ui_big::locks_map(tab);
     let mut click: Option<(usize, egui::Modifiers)> = None;
     let id = match side {
         Side::Unstaged => "unstaged_list",
@@ -350,6 +354,7 @@ fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool,
                         _ => "Stage",
                     };
                     let (resp, button) = file_row(ui, f, pal, selected, Some(label), indent(tree, *depth));
+                    crate::ui_big::file_badges(ui, resp.rect, f, tab, &locks, pal);
                     // The button works on the whole selection when the row is part of it.
                     let group: Vec<FileChange> = if picked_here && tab.picked.len() > 1 && tab.picked.contains(&f.path) {
                         files.iter().filter(|x| tab.picked.contains(&x.path)).cloned().collect()
@@ -361,7 +366,8 @@ fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool,
                     } else if resp.clicked() {
                         click = Some((pos, ui.input(|i| i.modifiers)));
                     }
-                    file_menu(&resp, &group, Some(side), pal, acts);
+                    let lock = tab.snap.lfs.used.then(|| locks.get(&f.path).cloned());
+                    file_menu(&resp, &group, Some(side), lock, pal, acts);
                 }
             }
         }
@@ -408,12 +414,35 @@ fn indent(tree: bool, depth: usize) -> f32 {
 }
 
 /// Right-click menu of one file or of the picked group. `side` is `None` for a past commit.
-fn file_menu(resp: &egui::Response, group: &[FileChange], side: Option<Side>, pal: &Palette, acts: &mut Vec<Action>) {
+/// `lock`: `Some` when the project uses LFS, holding the file's lock if it has one.
+fn file_menu(resp: &egui::Response, group: &[FileChange], side: Option<Side>, lock: Option<Option<crate::lfs::Lock>>, pal: &Palette, acts: &mut Vec<Action>) {
     let files = group.to_vec();
     let one = files.len() == 1;
     let what = if one { "file".to_string() } else { format!("{} files", files.len()) };
     resp.context_menu(|ui| {
         crate::util::menu_pad(ui);
+        // LFS locks (doc §LFS 5): lock so others don't edit it, or unlock mine.
+        if let (true, Some(lock)) = (one, &lock) {
+            let path = files[0].path.clone();
+            match lock {
+                None => {
+                    if ui.button("Lock so others don't edit it").on_hover_text("git lfs lock").clicked() {
+                        acts.push(Action::LfsLock(path));
+                        ui.close();
+                    }
+                }
+                Some(l) if l.mine => {
+                    if ui.button("Unlock").on_hover_text("git lfs unlock").clicked() {
+                        acts.push(Action::LfsUnlock { path, force: false });
+                        ui.close();
+                    }
+                }
+                Some(l) => {
+                    ui.label(RichText::new(format!("Locked by {}", l.owner)).weak());
+                }
+            }
+            ui.separator();
+        }
         match side {
             Some(Side::Unstaged) => {
                 if ui.button(format!("Stage {what}")).clicked() {
@@ -433,6 +462,10 @@ fn file_menu(resp: &egui::Response, group: &[FileChange], side: Option<Side>, pa
             let f = &files[0];
             if f.state == FileState::Conflicted {
                 ui.separator();
+                if ui.button("Resolve block by block…").on_hover_text("Each conflict as a card: keep one side, both, or edit").clicked() {
+                    acts.push(Action::OpenConflict(f.path.clone()));
+                    ui.close();
+                }
                 if ui.button("Keep my version (ours)").clicked() {
                     acts.push(Action::ResolveConflict(f.path.clone(), true));
                     ui.close();
@@ -511,6 +544,13 @@ fn composer(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
     ui.add_space(6.0);
     ui.checkbox(&mut tab.amend, RichText::new("Amend previous commit").color(pal.text2()));
     crate::ui_quick::identity_form(ui, tab, pal, acts);
+    // Fold the staged changes into an earlier commit (commit --fixup + autosquash).
+    if !tab.snap.status.staged.is_empty() && tab.snap.head_sha.is_some() {
+        let link = egui::Button::new(RichText::new("Add to an earlier commit…").size(12.0).color(pal.accent)).frame(false);
+        if ui.add(link).on_hover_text("The staged changes go into a commit you pick, as if they had always been there (fixup + autosquash)").clicked() {
+            acts.push(Action::OpenFixup);
+        }
+    }
 
     // Summary and description share one box, like a single message field.
     egui::Frame::new()
@@ -679,7 +719,7 @@ fn commit(ui: &mut egui::Ui, tab: &mut RepoTab, sha: &str, pal: &Palette, tree: 
                     if resp.clicked() {
                         acts.push(Action::OpenDiff(source.clone(), f.clone()));
                     }
-                    file_menu(&resp, std::slice::from_ref(f), None, pal, acts);
+                    file_menu(&resp, std::slice::from_ref(f), None, None, pal, acts);
                 }
             }
         }

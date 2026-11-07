@@ -619,3 +619,225 @@ fn reflog_reads_as_sentences() {
     assert!(act[0].time > 1_600_000_000);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Phase 3 "big pieces": editing history, adding to an earlier commit, conflicts block by
+// block, worktrees and Git LFS.
+// ---------------------------------------------------------------------------------------------
+
+use crate::conflict::{self, Choice, Segment};
+use crate::worktree;
+use crate::rewrite::{self, Change};
+
+/// The test's sequence editor: copy the prepared todo over git's (the app uses Vegit itself).
+fn cp_editor(todo: &Path) -> String {
+    format!("cp \"{}\"", todo.display().to_string().replace('\\', "/"))
+}
+
+/// main with four commits c1..c4 on a.txt..d.txt.
+fn repo_four_commits(name: &str) -> PathBuf {
+    let dir = temp_repo(name);
+    for (i, f) in ["a", "b", "c", "d"].iter().enumerate() {
+        write(&dir, &format!("{f}.txt"), &format!("{f}\n"));
+        g(&dir, &["add", "."]);
+        g(&dir, &["commit", "-q", "-m", &format!("c{}", i + 1)]);
+    }
+    dir
+}
+
+fn subjects(dir: &Path) -> Vec<String> {
+    g(dir, &["log", "--format=%s"]).lines().map(str::to_string).collect()
+}
+
+fn sha_of(dir: &Path, subject: &str) -> String {
+    g(dir, &["log", "--format=%H %s"]).lines().find(|l| l.ends_with(&format!(" {subject}"))).unwrap()[..40].to_string()
+}
+
+fn run_plan(dir: &Path, plan: &[rewrite::PlanItem]) {
+    let steps = rewrite::plan_steps(dir, plan, &cp_editor).unwrap();
+    let (result, entry) = safety::run_recorded(dir, &steps, Some(("rebase".into(), ResetMode::Keep)));
+    result.unwrap();
+    assert!(entry.is_some(), "a history edit can be undone");
+}
+
+/// Edit message, combine (both messages / the one below), remove and move, each as one rebase
+/// with no editor opening.
+#[test]
+fn history_edits_run_without_an_editor() {
+    let dir = repo_four_commits("rewrite");
+    let (_, plan) = rewrite::single_plan(&dir, &sha_of(&dir, "c3"), Change::Reword, "c3 better\n\nwith a body").unwrap();
+    run_plan(&dir, &plan);
+    assert_eq!(subjects(&dir), ["c4", "c3 better", "c2", "c1"]);
+    assert!(g(&dir, &["log", "-n", "1", "--skip", "1", "--format=%B"]).contains("with a body"));
+
+    let (_, plan) = rewrite::single_plan(&dir, &sha_of(&dir, "c4"), Change::Fixup, "").unwrap();
+    run_plan(&dir, &plan);
+    assert_eq!(subjects(&dir), ["c3 better", "c2", "c1"]);
+    assert!(dir.join("d.txt").exists(), "c4's changes are folded into the commit below");
+
+    let (_, plan) = rewrite::single_plan(&dir, &sha_of(&dir, "c2"), Change::Squash, "").unwrap();
+    run_plan(&dir, &plan);
+    let msg = g(&dir, &["log", "-n", "1", "--skip", "1", "--format=%B"]);
+    assert!(msg.contains("c1") && msg.contains("c2") && !msg.contains('#'), "both messages, comments cleaned: {msg}");
+
+    let (_, plan) = rewrite::move_plan(&dir, &sha_of(&dir, "c3 better"), false).unwrap();
+    let err = rewrite::check(&plan, &rewrite::history_from(&dir, &plan[0].sha).unwrap());
+    assert!(err.is_ok(), "{err:?}");
+    run_plan(&dir, &plan);
+    assert_eq!(subjects(&dir)[1], "c3 better");
+
+    let (_, plan) = rewrite::single_plan(&dir, &sha_of(&dir, "c3 better"), Change::Drop, "").unwrap();
+    run_plan(&dir, &plan);
+    assert!(!dir.join("c.txt").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A merge in the range is refused with a sentence; combining the oldest commit too.
+#[test]
+fn history_edits_refuse_merges_and_impossible_plans() {
+    let dir = repo_four_commits("rewritemerge");
+    g(&dir, &["switch", "-q", "-c", "side", "HEAD~1"]);
+    write(&dir, "s.txt", "s\n");
+    g(&dir, &["add", "."]);
+    g(&dir, &["commit", "-q", "-m", "side"]);
+    g(&dir, &["switch", "-q", "main"]);
+    g(&dir, &["merge", "-q", "--no-ff", "--no-edit", "side"]);
+    let from = sha_of(&dir, "c3");
+    let history = rewrite::history_from(&dir, &from).unwrap();
+    let plan = rewrite::plan_of(&history);
+    assert!(rewrite::check(&plan, &history).unwrap_err().contains("merge commit"));
+    let mut plan = rewrite::plan_of(&history[..1]);
+    plan[0].change = Change::Squash;
+    assert!(rewrite::check(&plan, &history[..1]).unwrap_err().contains("no commit below"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// "Add to an earlier commit": staged changes land in the chosen commit.
+#[test]
+fn staged_changes_are_added_to_an_earlier_commit() {
+    let dir = repo_four_commits("fixup");
+    write(&dir, "b.txt", "b fixed\n");
+    g(&dir, &["add", "b.txt"]);
+    let candidates = rewrite::fixup_candidates(&dir);
+    assert_eq!(candidates.len(), 4);
+    let target = sha_of(&dir, "c2");
+    let (result, _) = safety::run_recorded(&dir, &rewrite::fixup_steps(&dir, &target), Some(("add to an earlier commit".into(), ResetMode::Keep)));
+    result.unwrap();
+    assert_eq!(subjects(&dir), ["c4", "c3", "c2", "c1"], "no extra fixup commit is left");
+    let c2 = sha_of(&dir, "c2");
+    assert_eq!(g(&dir, &["show", &format!("{c2}:b.txt")]).replace("\r\n", "\n"), "b fixed\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The hidden sequence-editor mode copies the prepared todo over git's.
+#[test]
+fn sequence_editor_mode_copies_the_todo() {
+    let dir = temp_repo("seqedit");
+    write(&dir, "todo", "pick abc\n");
+    write(&dir, "git-todo", "noop\n");
+    let args = vec!["vegit".to_string(), "--sequence-editor".into(), dir.join("todo").display().to_string(), dir.join("git-todo").display().to_string()];
+    assert_eq!(rewrite::sequence_editor_main(&args), Some(0));
+    assert_eq!(std::fs::read_to_string(dir.join("git-todo")).unwrap(), "pick abc\n");
+    assert_eq!(rewrite::sequence_editor_main(&["vegit".to_string()]), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Blocks are parsed with their original, resolved one at a time, line endings kept.
+#[test]
+fn conflict_blocks_are_parsed_and_resolved_one_by_one() {
+    let text = "top\r\n<<<<<<< HEAD\r\nmine\r\n||||||| base\r\norig\r\n=======\r\ntheirs\r\n>>>>>>> feature\r\nmiddle\r\n<<<<<<< HEAD\r\nx\r\n=======\r\ny\r\n>>>>>>> feature\r\nend\r\n";
+    let segs = conflict::parse(text);
+    assert_eq!(conflict::count(&segs), 2);
+    let b = conflict::blocks(&segs)[0].clone();
+    assert_eq!((b.ours.as_str(), b.base.as_deref(), b.theirs.as_str()), ("mine\r\n", Some("orig\r\n"), "theirs\r\n"));
+    assert_eq!((b.ours_label.as_str(), b.theirs_label.as_str()), ("HEAD", "feature"));
+    let once = conflict::resolve(&segs, 0, &Choice::Theirs);
+    assert!(once.starts_with("top\r\ntheirs\r\nmiddle\r\n<<<<<<< HEAD\r\n"), "{once}");
+    let segs = conflict::parse(&once);
+    assert_eq!(conflict::count(&segs), 1);
+    assert_eq!(conflict::resolve(&segs, 0, &Choice::Both), "top\r\ntheirs\r\nmiddle\r\nx\r\ny\r\nend\r\n");
+    assert_eq!(conflict::resolve(&segs, 0, &Choice::Text("z".into())), "top\r\ntheirs\r\nmiddle\r\nz\r\nend\r\n");
+    assert!(matches!(conflict::parse("<<<<<<< HEAD\nunfinished\n").as_slice(), [Segment::Text(_)]));
+}
+
+/// A real merge conflict made through Vegit's git carries the original (zdiff3), and the
+/// sides are named after the branches.
+#[test]
+fn real_conflicts_carry_the_original_and_branch_names() {
+    let dir = temp_repo("zdiff3");
+    write(&dir, "a.txt", "line\n");
+    g(&dir, &["add", "."]);
+    g(&dir, &["commit", "-q", "-m", "base"]);
+    g(&dir, &["switch", "-q", "-c", "feature"]);
+    write(&dir, "a.txt", "feature line\n");
+    g(&dir, &["commit", "-q", "-am", "feature"]);
+    g(&dir, &["switch", "-q", "main"]);
+    write(&dir, "a.txt", "main line\n");
+    g(&dir, &["commit", "-q", "-am", "main"]);
+    assert!(git::run(&dir, &["merge", "feature"]).is_err());
+    let segs = conflict::parse(&std::fs::read_to_string(dir.join("a.txt")).unwrap());
+    let b = conflict::blocks(&segs)[0].clone();
+    assert_eq!(b.base.as_deref().map(|s| s.replace("\r\n", "\n")), Some("line\n".to_string()));
+    let names = conflict::side_names(&dir, Some(git::PendingOp::Merge), &b.ours_label, &b.theirs_label);
+    assert_eq!(names, ("main".to_string(), "feature".to_string()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Open a branch in another folder, see it listed with its changes, remove it; a vanished
+/// folder is pruned; git's refusal names the folder.
+#[test]
+fn worktrees_are_added_listed_removed_and_pruned() {
+    let dir = repo_one_commit("worktree");
+    g(&dir, &["branch", "feature"]);
+    let other = worktree::suggest_path(&dir, "feature/login");
+    assert!(other.file_name().unwrap().to_string_lossy().ends_with("-feature-login"));
+    let path = dir.parent().unwrap().join(format!("vegit-test-wt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&path);
+    run_args(&dir, worktree::add_args(&path, "feature", false, None));
+    write(&path, "a.txt", "changed there\n");
+    let list = worktree::list(&dir);
+    assert_eq!(list.len(), 2);
+    assert!(list[0].main);
+    assert_eq!((list[1].branch.as_deref(), list[1].changes), (Some("feature"), 1));
+
+    let err = git::run(&dir, &["switch", "feature"]).unwrap_err().0;
+    assert!(worktree::path_in_error(&err).is_some_and(|p| p.contains("vegit-test-wt")), "{err}");
+
+    assert!(git::run(&dir, &worktree::remove_args(&path, false).iter().map(String::as_str).collect::<Vec<_>>()).is_err(), "changes there: refused");
+    run_args(&dir, worktree::remove_args(&path, true));
+    assert_eq!(worktree::list(&dir).len(), 1);
+
+    run_args(&dir, worktree::add_args(&path, "fresh", false, Some("main")));
+    std::fs::remove_dir_all(&path).unwrap();
+    assert!(worktree::list(&dir).iter().any(|w| w.prunable));
+    let snap = git::load_snapshot(&dir).unwrap();
+    assert_eq!((snap.pruned, snap.worktrees.len()), (1, 1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// LFS: patterns, sizes, ages, lock lists and which changed files LFS stores.
+#[test]
+fn lfs_tracking_locks_and_sizes() {
+    assert_eq!(crate::lfs::pattern_for("Art/hero.psd"), "*.psd");
+    assert_eq!(crate::lfs::pattern_for("Makefile"), "Makefile");
+    assert_eq!(crate::lfs::human_size(13_002_342), "12.4 MB");
+    assert_eq!(crate::lfs::track_args("*.unity", true), ["lfs", "track", "--lockable", "*.unity"]);
+    let json = r#"{"ours":[{"id":"1","path":"Assets/Main.unity","owner":{"name":"me"},"locked_at":"2026-11-03T10:00:00Z"}],"theirs":[{"id":"2","path":"Assets/Hero.prefab","owner":{"name":"Alice"},"locked_at":"2026-11-03T10:00:00Z"}]}"#;
+    let locks = crate::lfs::parse_verified(json);
+    assert_eq!(locks.len(), 2);
+    assert!(locks[0].mine && !locks[1].mine);
+    assert_eq!(locks[1].owner, "Alice");
+    // 2026-11-03 is a Tuesday; four days later.
+    let now = 1_793_750_400 + 4 * 86_400;
+    assert_eq!(crate::lfs::since(&locks[1].locked_at, now), "since Tuesday");
+    assert!(crate::lfs::is_pointer(b"version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 12\n"));
+
+    let dir = repo_one_commit("lfs");
+    write(&dir, ".gitattributes", "*.psd filter=lfs diff=lfs merge=lfs -text\n");
+    write(&dir, "hero.psd", "pixels");
+    let info = crate::lfs::info(&dir, &["hero.psd".into(), "a.txt".into()]);
+    assert!(info.used);
+    assert_eq!(info.tracked.iter().collect::<Vec<_>>(), [&"hero.psd".to_string()]);
+    assert!(!info.unity);
+    let _ = std::fs::remove_dir_all(&dir);
+}

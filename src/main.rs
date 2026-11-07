@@ -9,6 +9,7 @@ mod access;
 mod app;
 mod avatars;
 mod backdrop;
+mod conflict;
 mod demo;
 mod diff;
 mod filelist;
@@ -16,12 +17,16 @@ mod forge;
 mod git;
 mod graph;
 mod icons;
+mod lfs;
 mod preview;
+mod rewrite;
 mod safety;
+mod worktree;
 #[cfg(test)]
 mod tests;
 mod theme;
 mod ui;
+mod ui_big;
 mod ui_detail;
 mod ui_graph;
 mod ui_quick;
@@ -33,6 +38,12 @@ use std::path::PathBuf;
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
+    // Hidden mode for history edits: git calls Vegit as its sequence editor to receive the
+    // prepared todo list (see rewrite.rs). No window opens.
+    let raw: Vec<String> = std::env::args().collect();
+    if let Some(code) = rewrite::sequence_editor_main(&raw) {
+        std::process::exit(code);
+    }
     let mut screenshot: Option<PathBuf> = None;
     let mut open: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);

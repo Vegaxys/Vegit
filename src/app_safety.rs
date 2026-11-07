@@ -164,7 +164,7 @@ impl VegitApp {
                     t.picked_commits.clear();
                 }
             }
-            _ => {}
+            other => self.handle_big(ctx, other),
         }
     }
 }

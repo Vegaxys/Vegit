@@ -73,6 +73,10 @@ pub enum Step {
     Git(Vec<String>),
     /// Git with this text on stdin (a patch).
     Input(Vec<String>, String),
+    /// Git with extra environment variables (`GIT_SEQUENCE_EDITOR` for history edits).
+    GitEnv(Vec<String>, Vec<(String, String)>),
+    /// Replace a file of the working folder with this text (a resolved conflict block).
+    Write(String, String),
     /// Delete a file of the working folder (relative path).
     Delete(String),
     /// Save these files before what follows changes them (undo restores them).
@@ -324,6 +328,14 @@ pub fn run_steps(dir: &Path, steps: &[Step], backups: &mut Vec<Backup>, record: 
             Step::Input(args, input) => {
                 let refs: Vec<&str> = args.iter().map(String::as_str).collect();
                 out = git::run_with_input(dir, &refs, input).map_err(|e| e.0)?;
+            }
+            Step::GitEnv(args, envs) => {
+                let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                let envs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+                out = git::run_env(dir, &refs, &envs).map_err(|e| e.0)?;
+            }
+            Step::Write(rel, text) => {
+                std::fs::write(dir.join(rel), text).map_err(|e| format!("{rel}: {e}"))?;
             }
             Step::Delete(rel) => {
                 let p = dir.join(rel);

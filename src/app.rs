@@ -30,6 +30,9 @@ use crate::theme::{self, Appearance, LaneMode, Palette, ThemeChoice};
 mod quick;
 #[path = "app_safety.rs"]
 mod safety_net;
+#[path = "app_big.rs"]
+mod big;
+pub use big::{ConflictView, HistoryEdit, RewriteKind, WorktreeForm, other_folders};
 pub use quick::{PushForm, RemoteCheck, RemoteForm};
 
 pub const SETTINGS_KEY: &str = "vegit_settings";
@@ -237,6 +240,12 @@ pub struct RepoTab {
     pub redo: Vec<UndoEntry>,
     /// Commits picked with Ctrl+click / Shift+click in the graph, in the order picked.
     pub picked_commits: Vec<String>,
+    /// "Edit history from here" in progress in the detail panel.
+    pub history_edit: Option<HistoryEdit>,
+    /// The conflicted file shown as cards.
+    pub conflict: Option<ConflictView>,
+    /// LFS locks on the server, once asked.
+    pub lfs_locks: Option<Result<Vec<crate::lfs::Lock>, String>>,
     pub file_view: Option<FileView>,
     /// Files picked in the working-changes lists (Ctrl/Shift+click), all in one list.
     pub picked: HashSet<String>,
@@ -292,6 +301,9 @@ impl RepoTab {
             undo: Vec::new(),
             redo: Vec::new(),
             picked_commits: Vec::new(),
+            history_edit: None,
+            conflict: None,
+            lfs_locks: None,
             file_view: None,
             picked: HashSet::new(),
             picked_list: ListId::Unstaged,
@@ -386,6 +398,15 @@ pub enum Dialog {
     Track { local: String, options: Vec<String>, choice: usize },
     /// The branch has commits no other branch has: list them before deleting anyway.
     Unmerged { branch: String, sha: String, commits: Vec<(String, String)> },
+    /// A new message for "Edit message…" or "Combine … (new message)".
+    CommitMessage { sha: String, change: crate::rewrite::Change, message: String },
+    /// "Add to an earlier commit…": commits not pushed yet, as (sha, summary).
+    Fixup { candidates: Vec<(String, String)>, choice: usize },
+    Worktree(WorktreeForm),
+    /// A worktree folder with uncommitted files.
+    RemoveWorktree { path: PathBuf, files: Vec<String> },
+    /// "Set up LFS for Unity": patterns one per line, editable before applying.
+    LfsPreset { patterns: String, lockable: String },
 }
 
 /// The "Create pull request" window: from a repository and branch into another.
@@ -546,6 +567,30 @@ pub enum Action {
     /// Ctrl+click (`toggle`) or Shift+click (`range`) on a graph row.
     PickCommit { sha: String, toggle: bool, range: bool },
     ClearPicked,
+    // Big pieces (app_big.rs): history edits, conflicts, worktrees, LFS.
+    RewriteCommit { sha: String, change: crate::rewrite::Change, message: String },
+    MoveCommit { sha: String, up: bool },
+    AskCommitMessage { sha: String, change: crate::rewrite::Change },
+    OpenHistoryEdit(String),
+    HistoryApply,
+    HistoryCancel,
+    OpenFixup,
+    FixupInto(String),
+    OpenConflict(String),
+    CloseConflict,
+    ResolveBlock { index: usize, choice: crate::conflict::Choice },
+    RecreateConflict(String),
+    OpenMergeTool(String),
+    OpenWorktreeForm { branch: String, remote: bool, new_from: Option<String> },
+    CreateWorktree { path: String, branch: String, remote: bool, new_from: Option<String>, open_tab: bool },
+    OpenWorktree(PathBuf),
+    RemoveWorktree(PathBuf),
+    RemoveWorktreeNow { path: PathBuf, stash: bool, force: bool },
+    OpenLfsPreset,
+    LfsTrack { patterns: Vec<String>, lockable: Vec<String> },
+    LfsLock(String),
+    LfsUnlock { path: String, force: bool },
+    RefreshLocks,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -576,6 +621,8 @@ enum OpKind {
     Squashed(String, String),
     /// Tags changed on this remote: ask it again which tags it has.
     RemoteTags(String),
+    /// LFS locks changed: read them again.
+    Locks,
 }
 
 /// Work for the worker thread, processed strictly in order.
@@ -589,6 +636,12 @@ enum Task {
     Blame { repo: PathBuf, path: String },
     /// What deleting a branch would lose.
     BranchCheck { repo: PathBuf, name: String },
+    /// The range of "Edit history from here".
+    History { repo: PathBuf, from: String },
+    /// A history edit, planned and run on the worker, recorded for Undo.
+    Rewrite { repo: PathBuf, kind: RewriteKind, what: String, ok_text: String },
+    /// Reads a conflicted file for the cards.
+    Conflict { repo: PathBuf, path: String, pending: Option<git::PendingOp> },
     /// Several steps run as one action, recorded for Undo when `what` is given.
     Steps { repo: PathBuf, label: String, ok_text: Option<String>, steps: Vec<Step>, what: Option<(String, ResetMode)>, kind: OpKind, role: Role },
 }
@@ -620,6 +673,10 @@ enum JobDone {
     RemoteChecked { url: String, result: Result<usize, String> },
     RemoteTags { tab_path: PathBuf, remote: String, result: Result<HashSet<String>, String> },
     BranchCheck { tab_path: PathBuf, name: String, result: Result<(String, Vec<(String, String)>), String> },
+    History { tab_path: PathBuf, from: String, result: Result<(Vec<crate::rewrite::HistoryCommit>, usize, Option<String>), String> },
+    Conflict { tab_path: PathBuf, path: String, result: Result<(Vec<crate::conflict::Segment>, (String, String)), String> },
+    Locks { tab_path: PathBuf, result: Result<Vec<crate::lfs::Lock>, String> },
+    WorktreeAdded { repo: PathBuf, path: PathBuf, result: Result<(), String>, open_tab: bool },
 }
 
 pub struct HomeForm {
@@ -823,6 +880,24 @@ impl VegitApp {
                     "drop" => {
                         app.drop_menu = Some(DropMenu { source: "feature/search".into(), target: "main".into(), pos: egui::pos2(420.0, 330.0) });
                     }
+                    "history" => {
+                        let history: Vec<crate::rewrite::HistoryCommit> = t.snap.commits.iter().take(5).rev().map(|c| crate::rewrite::HistoryCommit { sha: c.sha.clone(), summary: c.summary.clone(), message: c.summary.clone(), merge: false }).collect();
+                        let mut plan = crate::rewrite::plan_of(&history);
+                        plan[3].change = crate::rewrite::Change::Fixup;
+                        plan[1].change = crate::rewrite::Change::Drop;
+                        plan.swap(2, 4);
+                        t.history_edit = Some(HistoryEdit { from: history[0].sha.clone(), history, plan, pushed: 2, upstream: Some("origin/main".into()) });
+                    }
+                    "conflict" => {
+                        let text = "fn load() -> Settings {\n<<<<<<< HEAD\n    let path = config_dir().join(\"settings.toml\");\n    read_or_default(&path)\n||||||| base\n    read_or_default(\"settings.toml\")\n=======\n    let path = Path::new(\"settings.toml\");\n    read_or_create(path)\n>>>>>>> feature/search\n}\n\n<<<<<<< HEAD\nconst VERSION: u32 = 3;\n=======\nconst VERSION: u32 = 4;\n>>>>>>> feature/search\n";
+                        let segs = crate::conflict::parse(text);
+                        t.snap.pending = Some(git::PendingOp::Merge);
+                        t.conflict = Some(ConflictView { path: "src/settings/store.rs".into(), segs: Some(segs), total: 3, names: ("main".into(), "feature/search".into()), editing: None, show_base: true });
+                    }
+                    "worktree" => {
+                        app.actions.push(Action::Dialog(Dialog::Worktree(WorktreeForm { branch: "feature/search".into(), remote: false, new_from: None, path: "C:/Projects/sample-project-feature-search".into(), open_tab: true, unity: true })));
+                    }
+                    "lfs" => app.actions.push(Action::OpenLfsPreset),
                     "toast" => {
                         let undo = Action::Git { label: String::new(), args: Vec::new(), background: false };
                         app.toasts.push(Toast { text: "Deleted feature/old-login".into(), kind: ToastKind::Success, until: 1e9, action: Some(("Undo".into(), undo)) });
@@ -1046,6 +1121,10 @@ impl VegitApp {
                             }
                             if label == "Push" {
                                 self.mark_pushed(&tab_path);
+                                self.offer_unlock(ctx, &tab_path);
+                            }
+                            if label == "Fetch" && self.tab_by_path(&tab_path).is_some_and(|t| t.snap.lfs.used) {
+                                self.spawn_locks(ctx, tab_path.clone());
                             }
                             self.after_op(ctx, &tab_path, &kind);
                             if matches!(kind, OpKind::Commit) {
@@ -1065,7 +1144,12 @@ impl VegitApp {
                             if access::looks_like_auth_error(&e) {
                                 text.push_str("\n\nPrivate repository? Open Access (key button, top right) to sign in.");
                             }
-                            self.toast(ctx, text, ToastKind::Error);
+                            // A branch open in another folder: offer to go there (doc §Worktrees 4).
+                            if let Some(folder) = crate::worktree::path_in_error(&e) {
+                                self.toast_offer(ctx, "This branch is open in another folder. Go there?", ToastKind::Info, "Go there", Action::OpenWorktree(PathBuf::from(folder)));
+                            } else {
+                                self.toast(ctx, text, ToastKind::Error);
+                            }
                         }
                     }
                     if !from_worker && self.tabs.iter().any(|t| t.path.as_ref() == Some(&tab_path)) {
@@ -1190,6 +1274,42 @@ impl VegitApp {
                         }
                     }
                 }
+                JobDone::History { tab_path, from, result } => {
+                    self.pending = self.pending.saturating_sub(1);
+                    match result {
+                        Ok((history, pushed, upstream)) => {
+                            if let Some(t) = self.tab_by_path(&tab_path) {
+                                let plan = crate::rewrite::plan_of(&history);
+                                t.history_edit = Some(HistoryEdit { from, history, plan, pushed, upstream });
+                                t.diff = None;
+                            }
+                        }
+                        Err(e) => self.toast(ctx, e, ToastKind::Error),
+                    }
+                }
+                JobDone::Conflict { tab_path, path, result } => {
+                    self.pending = self.pending.saturating_sub(1);
+                    let Some(t) = self.tab_by_path(&tab_path) else { continue };
+                    match (t.conflict.as_mut().filter(|c| c.path == path), result) {
+                        (Some(cv), Ok((segs, names))) => {
+                            let n = crate::conflict::count(&segs);
+                            cv.total = cv.total.max(n);
+                            cv.names = names;
+                            cv.segs = Some(segs);
+                        }
+                        (Some(_), Err(e)) => {
+                            t.conflict = None;
+                            self.toast(ctx, e, ToastKind::Error);
+                        }
+                        _ => {}
+                    }
+                }
+                JobDone::Locks { tab_path, result } => {
+                    if let Some(t) = self.tab_by_path(&tab_path) {
+                        t.lfs_locks = Some(result);
+                    }
+                }
+                JobDone::WorktreeAdded { repo, path, result, open_tab } => self.on_worktree_added(ctx, repo, path, result, open_tab),
                 JobDone::RemoteChecked { url, result } => self.on_remote_checked(url, result),
                 JobDone::RemoteTags { tab_path, remote, result } => {
                     // A failure (offline, no access) just leaves the badges off.
@@ -1325,10 +1445,23 @@ impl VegitApp {
                     }
                 }
             }
-            Action::OpenDiff(source, file) => self.request_diff(ctx, source, file, false),
+            Action::OpenDiff(source, file) => {
+                // A conflicted file opens as cards, one per conflict (doc §Conflits).
+                let conflicted = file.state == FileState::Conflicted && source == DiffSource::Unstaged;
+                if let Some(t) = self.tab() {
+                    if !conflicted {
+                        t.conflict = None;
+                    }
+                }
+                if conflicted && self.active_path().is_some() {
+                    self.open_conflict(file.path.clone());
+                }
+                self.request_diff(ctx, source, file, false);
+            }
             Action::CloseDiff => {
                 if let Some(t) = self.tab() {
                     t.diff = None;
+                    t.conflict = None;
                 }
             }
             Action::Git { label, args, background } => {
@@ -1340,6 +1473,7 @@ impl VegitApp {
                 }
             }
             Action::Stage(f) => {
+                self.suggest_lfs(ctx, std::slice::from_ref(&f));
                 if f.state == FileState::Deleted {
                     self.queue(ctx, "", &["rm", "--cached", "-q", "--", &f.path]);
                 } else {
@@ -1466,6 +1600,7 @@ impl VegitApp {
                 }
             }
             Action::StageMany(files) => {
+                self.suggest_lfs(ctx, &files);
                 for chunk in files.chunks(100) {
                     let mut args: Vec<String> = vec!["add".into(), "-A".into(), "--".into()];
                     args.extend(chunk.iter().map(|f| f.path.clone()));
@@ -2000,6 +2135,28 @@ fn run_task(task: Task) -> JobDone {
         Task::Blame { repo, path } => {
             let result = git::blame(&repo, &path).map_err(|e| e.0);
             JobDone::Blame { tab_path: repo, path, result }
+        }
+        Task::History { repo, from } => {
+            let upstream = git::run(&repo, &["rev-parse", "--abbrev-ref", "-q", "@{upstream}"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            let result = crate::rewrite::history_from(&repo, &from).map_err(|e| e.0).map(|h| {
+                let pushed = upstream.as_deref().map_or(0, |u| crate::rewrite::pushed_count(&repo, &from, u));
+                (h, pushed, upstream.clone())
+            });
+            JobDone::History { tab_path: repo, from, result }
+        }
+        Task::Rewrite { repo, kind, what, ok_text } => {
+            let (result, journal) = match big::rewrite_steps(&repo, kind) {
+                Ok(steps) => {
+                    let (result, entry) = safety::run_recorded(&repo, &steps, Some((what, ResetMode::Keep)));
+                    (result, entry.map(|e| (e, Role::New)))
+                }
+                Err(e) => (Err(e), None),
+            };
+            JobDone::Op { tab_path: repo, label: "Edit history".into(), ok_text: Some(ok_text), result, kind: OpKind::Plain, from_worker: true, journal }
+        }
+        Task::Conflict { repo, path, pending } => {
+            let result = big::read_conflict(&repo, &path, pending);
+            JobDone::Conflict { tab_path: repo, path, result }
         }
         Task::BranchCheck { repo, name } => {
             let result = quick::branch_check(&repo, &name);

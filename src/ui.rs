@@ -419,7 +419,7 @@ impl VegitApp {
                                 let conflicts = tab.snap.status.unstaged.iter().filter(|f| f.state == FileState::Conflicted).count();
                                 ui.label(RichText::new(format!("A {} is in progress.", op.label())).strong());
                                 if conflicts > 0 {
-                                    ui.label(format!("{conflicts} file(s) have conflicts: fix them, then press \"Resolved\" on each."));
+                                    ui.label(format!("{conflicts} file(s) have conflicts: open each one to choose block by block."));
                                 } else {
                                     ui.label("No conflicts left: you can continue.");
                                 }
@@ -441,6 +441,10 @@ impl VegitApp {
                                 });
                             });
                         });
+                }
+                if tab.snap.lfs.used && !tab.snap.lfs.installed {
+                    ui.add_space(g as f32);
+                    crate::ui_big::lfs_banner(ui, tab, pal, &mut acts);
                 }
             });
 
@@ -494,6 +498,8 @@ impl VegitApp {
                 fill_tile(ui, pal, |ui| {
                     if tab.loading {
                         ui_detail::loading(ui, "Reading the history…");
+                    } else if tab.conflict.is_some() {
+                        crate::ui_big::conflict_view(ui, tab, pal, &mut acts);
                     } else if tab.file_view.is_some() {
                         ui_detail::file_view(ui, tab, pal, diff_mode, &mut acts);
                     } else if tab.diff.is_some() {
@@ -701,9 +707,19 @@ impl VegitApp {
                         let from = at.as_deref().map_or("where you are now".to_string(), |a| if a.len() == 40 { git::short(a).to_string() } else { a.to_string() });
                         ui.label(RichText::new(format!("Starts from {from}")).color(pal.muted));
                         ui.add(egui::TextEdit::singleline(name).hint_text("feature/my-idea").desired_width(f32::INFINITY)).request_focus();
-                        ui.checkbox(checkout, "Switch to it right away");
+                        // "Work on it in a separate folder": a worktree instead of switching here.
+                        let sep_id = egui::Id::unique("new_branch_separate");
+                        let mut separate = ui.data(|d| d.get_temp::<bool>(sep_id)).unwrap_or(false);
+                        ui.add_enabled(!separate, egui::Checkbox::new(checkout, "Switch to it right away"));
+                        ui.checkbox(&mut separate, "Work on it in a separate folder").on_hover_text("git worktree add -b: its own folder and tab; this folder stays as it is");
+                        ui.data_mut(|d| d.insert_temp(sep_id, separate));
                         let valid = !name.trim().is_empty() && !name.contains(' ');
-                        if footer(ui, pal, "Create", valid) || (enter && valid) {
+                        if separate && (footer(ui, pal, "Next…", valid) || (enter && valid)) {
+                            let start = at.clone().unwrap_or_else(|| "HEAD".into());
+                            acts.push(Action::OpenWorktreeForm { branch: name.trim().to_string(), remote: false, new_from: Some(start) });
+                            ui.data_mut(|d| d.remove::<bool>(sep_id));
+                            keep = false;
+                        } else if !separate && (footer(ui, pal, "Create", valid) || (enter && valid)) {
                             let n = name.trim().to_string();
                             let mut args: Vec<String> = if *checkout { vec!["switch".into(), "-c".into(), n.clone()] } else { vec!["branch".into(), n.clone()] };
                             if let Some(a) = at {

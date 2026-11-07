@@ -61,6 +61,29 @@ hooks, config and SSH keys behave exactly as they do in a terminal.
 - **Drag and drop**: drag a branch (graph label or sidebar) onto a local branch for « Bring … into … »,
   « … as one commit », « Replay … on top of … » or the « More options ».
 - **Picking several commits**: Ctrl+click and Shift+click in the graph; the detail panel lists them.
+- **Editing history** (right-click a commit of the current branch): « Edit message… », « Combine with the
+  commit below » (keep both messages, keep the one below, or write a new one), « Remove this commit »,
+  « Move up » / « Move down », each in one click with Undo. « Edit history from here… » turns the detail
+  panel into the list of commits: drag to reorder, pick what happens to each, then « Apply N changes ». It
+  warns when commits are already on the server and refuses ranges with merge commits. No editor ever opens:
+  git receives the prepared list from Vegit itself (`vegit --sequence-editor`).
+- **Add to an earlier commit…** (commit panel): the staged changes go into a commit not pushed yet
+  (`commit --fixup` + `rebase --autosquash`).
+- **Conflicts block by block**: a conflicted file opens as cards, both versions side by side and titled with
+  the branch names (even during a rebase, where git swaps "ours" and "theirs"), the original underneath
+  (« Show the original », zdiff3 style), and « Keep main », « Keep feature », « Keep both », « Edit… ».
+  « 2 of 5 conflicts left »; the last choice marks the file resolved. « Open in my merge tool » too.
+- **Worktrees**: « Open in a separate folder… » on a branch (or « Work on it in a separate folder » when
+  creating one) makes a folder and a tab; a « Worktrees » section lists them with a dot when they have
+  changes; branch labels open elsewhere carry a folder badge and double-click goes to that tab; switching to
+  such a branch offers « Go there »; « Remove folder… » offers to stash the changes first; vanished folders
+  are pruned on refresh.
+- **Git LFS** (for Unity projects): a banner when the project uses LFS but LFS is missing; « LFS 12.4 MB »
+  badges in the file lists; previews show the real picture behind a pointer; staging a file over 50 MB
+  suggests storing its kind with LFS; « Set up LFS for Unity… » (editable patterns, scenes and prefabs
+  lockable); « Lock so others don't edit it » / « Unlock » on files; a « Big files (LFS) » section lists
+  my locks and others' (refreshed after each fetch), with « Force unlock » under More options; files locked
+  by someone else show « Locked by Alice since Tuesday »; after a push, a file I still lock offers « Unlock it ».
 - **Identity**: when git doesn't know your name or e-mail, the commit panel asks « Who are you? » (for all
   projects or only this one). Settings → Identity shows both levels and which one applies.
 - **File history and blame** for any file.
@@ -132,7 +155,7 @@ In screenshot mode, environment variables open other screens of the sample proje
 | `VEGIT_PREVIEW_PR=1` | The Create Pull Request dialog |
 | `VEGIT_PREVIEW_CONFLICT=1` | A merge stopped on a conflicted file |
 | `VEGIT_PREVIEW_SETTINGS=1`, `VEGIT_PREVIEW_ACCESS=1` | The settings or the access dialog |
-| `VEGIT_PREVIEW_QUICK=remote` | `remote`, `push`, `unmerged`: Add remote, Push…, delete an unmerged branch; `identity`: « Who are you? »; `rebase`: the banner with « Skip this commit »; `toast`: a toast with Undo; `undo`: named Undo / Redo; `picked`: three picked commits; `drop`: the menu after a drag and drop |
+| `VEGIT_PREVIEW_QUICK=remote` | `remote`, `push`, `unmerged`: Add remote, Push…, delete an unmerged branch; `identity`: « Who are you? »; `rebase`: the banner with « Skip this commit »; `toast`: a toast with Undo; `undo`: named Undo / Redo; `picked`: three picked commits; `drop`: the menu after a drag and drop; `history`: Edit history; `conflict`: conflict cards; `worktree`: Open in a separate folder; `lfs`: Set up LFS for Unity |
 
 For example (in a POSIX shell):
 
@@ -153,7 +176,9 @@ parsing, hunk staging, graph layout) and against a local bare repository standin
 (remotes, pushing and deleting tags, upstream and "gone" branches, forced delete and its restore, skipping
 during a rebase, identity at the project level, merge options), and the safety net (undo of commits,
 branch changes, discards with their backups, hard resets, merges into another branch and stashes; backup
-purge; the reflog in words). One extra test lists the open pull requests of a public GitHub
+purge; the reflog in words), and phase 3 (history edits without an editor, refusals, adding to an earlier
+commit, the sequence-editor mode, conflict blocks and real zdiff3 conflicts with branch names, worktrees
+added, listed, removed and pruned, LFS tracking, locks and sizes). One extra test lists the open pull requests of a public GitHub
 repository; it needs network access, so it is ignored by default. Run it with:
 
 ```bash

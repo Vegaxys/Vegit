@@ -19,7 +19,7 @@ pub fn width(dialog: &Dialog) -> Option<f32> {
         Dialog::AddRemote(_) => Some(500.0),
         Dialog::Push(_) | Dialog::Unmerged { .. } => Some(470.0),
         Dialog::RenameRemote { .. } | Dialog::RemoteUrl { .. } | Dialog::DeleteTag { .. } | Dialog::Track { .. } => Some(420.0),
-        _ => None,
+        d => crate::ui_big::width(d),
     }
 }
 
@@ -126,7 +126,7 @@ pub fn dialog(ui: &mut egui::Ui, dialog: &mut Dialog, tab: Option<&RepoTab>, pal
             });
             close
         }
-        _ => false,
+        d => crate::ui_big::dialog(ui, d, tab, pal, acts),
     }
 }
 

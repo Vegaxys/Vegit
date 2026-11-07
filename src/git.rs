@@ -153,6 +153,11 @@ pub struct Snapshot {
     pub identity: Identity,
     /// What happened lately (the reflog), in plain sentences, newest first.
     pub activity: Vec<crate::safety::Activity>,
+    /// Folders of this repository (worktrees), the main one first.
+    pub worktrees: Vec<crate::worktree::Worktree>,
+    /// Worktrees whose folder had vanished and were just pruned.
+    pub pruned: usize,
+    pub lfs: crate::lfs::LfsInfo,
 }
 
 impl Snapshot {
@@ -198,6 +203,13 @@ fn base_command(dir: &Path) -> Command {
     cmd.env("LC_ALL", "C");
     // Background status polls must never grab index.lock and make a stage/commit fail.
     cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    // Conflicts written by Vegit's own merges and rebases carry the original version too
+    // ("Show the original" in the conflict cards). Needs git 2.35.
+    if zdiff3_supported() {
+        cmd.env("GIT_CONFIG_COUNT", "1");
+        cmd.env("GIT_CONFIG_KEY_0", "merge.conflictStyle");
+        cmd.env("GIT_CONFIG_VALUE_0", "zdiff3");
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -205,6 +217,24 @@ fn base_command(dir: &Path) -> Command {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
+}
+
+/// git 2.35 or newer (zdiff3 conflict style), checked once.
+fn zdiff3_supported() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        let mut cmd = Command::new("git");
+        cmd.arg("--version");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        let v = cmd.output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        let mut nums = v.split_whitespace().nth(2).unwrap_or("").split('.').map(|n| n.parse::<u32>().unwrap_or(0));
+        let (major, minor) = (nums.next().unwrap_or(0), nums.next().unwrap_or(0));
+        (major, minor) >= (2, 35)
+    })
 }
 
 /// Runs git and returns stdout; a non-zero exit becomes an error holding stderr.
@@ -289,6 +319,20 @@ pub fn run_bytes(dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
     out.status.success().then_some(out.stdout)
 }
 
+/// Raw bytes in, raw bytes out (`git lfs smudge` turns a pointer into the real file).
+pub fn run_bytes_with_input(dir: &Path, args: &[&str], input: &[u8]) -> Option<Vec<u8>> {
+    let mut child = base_command(dir).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut stdin = child.stdin.take()?;
+    let data = input.to_vec();
+    // Write on a thread so a big output can't block on a full pipe while we still write.
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&data);
+    });
+    let out = child.wait_with_output().ok()?;
+    let _ = writer.join();
+    out.status.success().then_some(out.stdout)
+}
+
 /// Runs git with `input` piped to stdin (used to apply single hunks).
 pub fn run_with_input(dir: &Path, args: &[&str], input: &str) -> GitResult<String> {
     let mut child = base_command(dir)
@@ -360,6 +404,15 @@ pub fn load_snapshot(dir: &Path) -> GitResult<Snapshot> {
 
     snap.identity = identity(dir);
     snap.activity = crate::safety::activity(dir, 60);
+    snap.worktrees = crate::worktree::list(dir);
+    // A worktree folder deleted from disk: tidy git's list quietly (the window says so).
+    let gone = snap.worktrees.iter().filter(|w| w.prunable).count();
+    if gone > 0 && run(dir, &["worktree", "prune"]).is_ok() {
+        snap.pruned = gone;
+        snap.worktrees.retain(|w| !w.prunable);
+    }
+    let changed: Vec<String> = snap.status.unstaged.iter().chain(&snap.status.staged).map(|f| f.path.clone()).collect();
+    snap.lfs = crate::lfs::info(dir, &changed);
     snap.pending = if git_dir.join("MERGE_HEAD").exists() {
         Some(PendingOp::Merge)
     } else if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {

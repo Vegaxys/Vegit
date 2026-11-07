@@ -70,9 +70,11 @@ pub fn load_pair(repo: &Path, source: &DiffSource, file: &FileChange) -> Pair {
             (before, after)
         }
     };
+    // Files stored with LFS come out of git as small pointers: show the real picture.
+    let real = |b: Vec<u8>| if crate::lfs::is_pointer(&b) { crate::lfs::smudge(repo, &b).unwrap_or(b) } else { b };
     Pair {
-        before: before.map(|b| decode(&b, kind)),
-        after: after.map(|b| decode(&b, kind)),
+        before: before.map(real).map(|b| decode(&b, kind)),
+        after: after.map(real).map(|b| decode(&b, kind)),
     }
 }
 

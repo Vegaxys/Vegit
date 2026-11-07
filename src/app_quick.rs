@@ -142,6 +142,7 @@ impl VegitApp {
     pub(super) fn after_op(&mut self, ctx: &egui::Context, tab_path: &PathBuf, kind: &OpKind) {
         match kind {
             OpKind::RemoteTags(remote) => self.spawn_remote_tags(ctx, tab_path.clone(), remote.clone()),
+            OpKind::Locks => self.spawn_locks(ctx, tab_path.clone()),
             OpKind::Squashed(summary, body) => {
                 if let Some(t) = self.tab_by_path(tab_path) {
                     t.summary = summary.clone();
@@ -353,6 +354,12 @@ impl VegitApp {
 pub fn explain_failure(e: &str) -> Option<String> {
     if e.contains("Not possible to fast-forward") || e.contains("Diverging branches can't be fast-forwarded") {
         return Some("Nothing was changed: both branches have new commits, so this needs a merge commit. Use « Bring … into … » instead.".into());
+    }
+    if e.contains("Could not apply") || e.contains("CONFLICT") && e.contains("rebase") {
+        return Some("The history edit stopped on a conflict: resolve it, then Continue (or Abort to put everything back).".into());
+    }
+    if e.contains("Stopped at") {
+        return Some("Stopped on the commit: change its files, then press Continue in the banner.".into());
     }
     if e.contains("has no upstream branch") {
         return Some("This branch has no remote branch yet. Use Push… (right-click Push) to choose where it goes.".into());
