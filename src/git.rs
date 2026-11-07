@@ -829,22 +829,27 @@ impl PendingOp {
 }
 
 /// Who commits: `user.name` / `user.email` for all projects (global) and for this one
-/// (local). The local values win when set.
+/// (local), plus the values git will really use. Those can come from a file the global or
+/// local config includes (`include`, `includeIf`) or from the system config, so
+/// completeness is judged on them, never on the two levels alone.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Identity {
     pub global_name: Option<String>,
     pub global_email: Option<String>,
     pub local_name: Option<String>,
     pub local_email: Option<String>,
+    /// What git uses, every level and included file considered (last one wins).
+    pub effective_name: Option<String>,
+    pub effective_email: Option<String>,
 }
 
 impl Identity {
     pub fn name(&self) -> Option<&str> {
-        self.local_name.as_deref().or(self.global_name.as_deref())
+        self.effective_name.as_deref().or(self.local_name.as_deref()).or(self.global_name.as_deref())
     }
 
     pub fn email(&self) -> Option<&str> {
-        self.local_email.as_deref().or(self.global_email.as_deref())
+        self.effective_email.as_deref().or(self.local_email.as_deref()).or(self.global_email.as_deref())
     }
 
     /// Both set somewhere, so git can commit.
@@ -854,24 +859,45 @@ impl Identity {
 
     /// Which level the name in use comes from.
     pub fn source(&self) -> &'static str {
-        match (self.local_name.is_some() || self.local_email.is_some(), self.global_name.is_some() || self.global_email.is_some()) {
-            (true, _) => "this project",
-            (false, true) => "all projects",
+        let local = self.local_name.is_some() || self.local_email.is_some();
+        let global = self.global_name.is_some() || self.global_email.is_some();
+        match (local, global, self.is_complete()) {
+            (true, _, _) => "this project",
+            (false, true, _) => "all projects",
+            (false, false, true) => "git's system settings",
             _ => "nowhere yet",
         }
     }
 }
 
+/// Reads the identity in one `git config` call. Without a file option, git follows
+/// `include` / `includeIf` and reports an included value under the scope of the file that
+/// includes it, so a `includeIf "gitdir:~/work/"` set in the global config counts as global.
 pub fn identity(dir: &Path) -> Identity {
-    let get = |scope: &str, key: &str| {
-        run(dir, &["config", scope, "--get", key]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
-    };
-    Identity {
-        global_name: get("--global", "user.name"),
-        global_email: get("--global", "user.email"),
-        local_name: get("--local", "user.name"),
-        local_email: get("--local", "user.email"),
+    let mut id = Identity::default();
+    // Exit code 1 means "no match": nothing is set anywhere.
+    let Ok(out) = run(dir, &["config", "--show-scope", "--get-regexp", r"^user\.(name|email)$"]) else { return id };
+    for line in out.lines() {
+        // "<scope>\t<key> <value>"; the value may contain spaces.
+        let Some((scope, rest)) = line.split_once('\t') else { continue };
+        let (key, value) = rest.split_once(' ').unwrap_or((rest, ""));
+        let value = Some(value.trim().to_string()).filter(|v| !v.is_empty());
+        let is_name = key.eq_ignore_ascii_case("user.name");
+        match scope {
+            "global" if is_name => id.global_name = value.clone(),
+            "global" => id.global_email = value.clone(),
+            "local" | "worktree" if is_name => id.local_name = value.clone(),
+            "local" | "worktree" => id.local_email = value.clone(),
+            _ => {}
+        }
+        // Lines come in the order git reads them, so the last one is the one it uses.
+        if is_name {
+            id.effective_name = value;
+        } else {
+            id.effective_email = value;
+        }
     }
+    id
 }
 
 /// `git config [--global|--local] <key> <value>`; an empty value removes the key.

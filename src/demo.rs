@@ -125,6 +125,8 @@ pub fn snapshot() -> Snapshot {
             global_email: Some("alex@example.com".into()),
             local_name: None,
             local_email: None,
+            effective_name: Some("Alex Martin".into()),
+            effective_email: Some("alex@example.com".into()),
         },
     }
 }

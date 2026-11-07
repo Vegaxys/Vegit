@@ -335,6 +335,25 @@ fn local_identity_is_written_read_and_preferred() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An identity set in a file the config includes (how `includeIf` setups work) counts: the
+/// commit panel must not ask "Who are you?" when git can already commit.
+#[test]
+fn identity_from_an_included_file_is_found() {
+    let dir = temp_repo("identity-include");
+    g(&dir, &["config", "--unset", "user.name"]);
+    g(&dir, &["config", "--unset", "user.email"]);
+    let included = dir.join("identity.inc");
+    write(&dir, "identity.inc", "[user]\n\tname = Included Person\n\temail = included@example.com\n");
+    let path = included.to_string_lossy().replace('\\', "/");
+    g(&dir, &["config", "include.path", &path]);
+    let id = git::identity(&dir);
+    assert_eq!(id.name(), Some("Included Person"));
+    assert_eq!(id.email(), Some("included@example.com"));
+    assert!(id.is_complete());
+    assert_eq!(id.source(), "this project", "an included value takes the scope of the file that includes it");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The merge options: squash stages without committing, --no-ff always makes a merge commit,
 /// --ff-only refuses when a merge commit would be needed.
 #[test]
