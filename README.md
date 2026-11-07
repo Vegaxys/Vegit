@@ -76,6 +76,37 @@ hooks, config and SSH keys behave exactly as they do in a terminal.
   lockable); « Lock so others don't edit it » / « Unlock » on files; a « Big files (LFS) » section lists
   my locks and others' (refreshed after each fetch), with « Force unlock » under More options; files locked
   by someone else show « Locked by Alice since Tuesday »; after a push, a file I still lock offers « Unlock it ».
+- **Staging lines**: click changed lines in a diff's gutter, then « Stage 3 lines », « Unstage » or
+  « Discard » (with Undo).
+- **Comparing**: Ctrl+click two commits for « Comparing a1b2c3 → d4e5f6 · 12 files »; right-click a branch
+  → « Compare with main »: commits only on each side, and « What feature changed » since they split.
+- **Searching**: the search field has modes: Message, Author, Changed text (`log -S`, every branch, in the
+  background) and File path; right-click a commit → « Search files at this commit… » (`git grep`).
+- **Full history**: scrolling to the bottom loads the next 3 000 commits; a commit not loaded yet (a link,
+  Activity, a search) is loaded on demand.
+- **Stash**: « Stash these files » on picked files, « Turn into a branch… » on a stash, « Delete all » on
+  the Stashes header (with Undo).
+- **Copying several commits**: right-click picked commits → « Copy 3 commits onto main » (oldest first);
+  More options: « Mention the original commit » (`-x`), « Apply the changes without committing ».
+- **Finding the commit that broke something** (`bisect`): right-click a commit that worked; a banner asks
+  « Does the problem happen here? » (Yes, broken / No, it works / Can't test / Stop), the graph greys the
+  commits already ruled out, and the first broken commit is named and selected. More options: run a test
+  command automatically.
+- **Move only my commits onto…** (`rebase --onto`), on a local branch, says how many commits will move.
+- **Submodules**: « + » to add one, « Update to latest », « Sync URL », « Remove » (the three git steps in one),
+  and a « new commits » badge when one moved.
+- **Clone options**: branch (listed from the server), « Only recent history (faster) », « Include
+  submodules »; « Load full history » later from the repository menu.
+- **Cleanup** (right-click the trash button): « Delete all new files (12) » with Undo; « Also remove ignored
+  files… » with the space freed and a warning when Unity's Library/ is included.
+- **Repository menu** (click its name): « Choose folders to download… » (sparse-checkout), « Speed up this
+  repository » (size before / after), « Keep it fast automatically », « Check for problems ».
+- **Patches**: « Save as patch file… » on one or several commits; drop a `.patch` on the window to preview and
+  apply it.
+- **Signatures**: signed commits carry a dot after their SHA (green when verified); the tooltip names the
+  signer.
+- **Commit options** (« More options » under the message, remembered per repository): sign-off, sign (when a
+  key is set), skip hooks (with a warning), co-authors picked among the repository's authors.
 - **Identity**: when git doesn't know your name or e-mail, the commit panel asks « Who are you? » (for all
   projects or only this one). Settings → Identity shows both levels and which one applies.
 - **File history and blame** for any file.
@@ -147,7 +178,7 @@ In screenshot mode, environment variables open other screens of the sample proje
 | `VEGIT_PREVIEW_PR=1` | The Create Pull Request dialog |
 | `VEGIT_PREVIEW_CONFLICT=1` | A merge stopped on a conflicted file |
 | `VEGIT_PREVIEW_SETTINGS=1`, `VEGIT_PREVIEW_ACCESS=1` | The settings or the access dialog |
-| `VEGIT_PREVIEW_QUICK=remote` | `remote`, `push`, `unmerged`: Add remote, Push…, delete an unmerged branch; `identity`: « Who are you? »; `rebase`: the banner with « Skip this commit »; `toast`: a toast with Undo; `undo`: named Undo / Redo; `picked`: three picked commits; `drop`: the menu after a drag and drop; `history`: Edit history; `conflict`: conflict cards; `worktree`: Open in a separate folder; `lfs`: Set up LFS for Unity |
+| `VEGIT_PREVIEW_QUICK=remote` | `remote`, `push`, `unmerged`: Add remote, Push…, delete an unmerged branch; `identity`: « Who are you? »; `rebase`: the banner with « Skip this commit »; `toast`: a toast with Undo; `undo`: named Undo / Redo; `picked`: three picked commits; `drop`: the menu after a drag and drop; `history`: Edit history; `conflict`: conflict cards; `worktree`: Open in a separate folder; `lfs`: Set up LFS for Unity; `compare`: two branches compared; `bisect`: the bisect banner; `options`: commit options |
 
 For example (in a POSIX shell):
 
@@ -170,7 +201,9 @@ during a rebase, identity at the project level, merge options), and the safety n
 branch changes, discards with their backups, hard resets, merges into another branch and stashes; backup
 purge; the reflog in words), and phase 3 (history edits without an editor, refusals, adding to an earlier
 commit, the sequence-editor mode, conflict blocks and real zdiff3 conflicts with branch names, worktrees
-added, listed, removed and pruned, LFS tracking, locks and sizes). One extra test lists the open pull requests of a public GitHub
+added, listed, removed and pruned, LFS tracking, locks and sizes), and phases 4 and 5 (staging lines,
+comparing, content search, paging, advanced stash, copying commits, bisect, `rebase --onto`, clone options
+and cleanup, sparse-checkout, patches, signatures, maintenance, commit options, submodules). One extra test lists the open pull requests of a public GitHub
 repository; it needs network access, so it is ignored by default. Run it with:
 
 ```bash

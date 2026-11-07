@@ -22,6 +22,9 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, sor
     if tab.history_edit.is_some() {
         return crate::ui_big::history_panel(ui, tab, pal, acts);
     }
+    if tab.compare.is_some() {
+        return crate::ui_extra::compare_panel(ui, tab, pal, acts);
+    }
     if tab.picked_commits.len() > 1 {
         return picked(ui, tab, pal, acts);
     }
@@ -128,9 +131,11 @@ fn wip(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, sort_by_
                 icons::paint(p, trash.shrink(6.0), Icon::Trash, col);
             }
             // No confirmation: the files are saved first and the toast offers Undo (doc rule 4).
-            if tr.on_hover_text("Discard all unstaged changes (Undo brings them back)").clicked() && can_discard {
+            let tr = tr.on_hover_text("Discard all unstaged changes (Undo brings them back)\nRight-click: delete new files, remove ignored files");
+            if tr.clicked() && can_discard {
                 acts.push(Action::DiscardMany(tab.snap.status.unstaged.clone()));
             }
+            tr.context_menu(|ui| crate::ui_extra::cleanup_menu(ui, tab, acts));
             // Title: "15 file changes on [branch]", centred, the branch pill cut with "…".
             let font = egui::FontId::proportional(14.5);
             let lead = format!("{n} file change{} on ", if n == 1 { "" } else { "s" });
@@ -443,6 +448,10 @@ fn file_menu(resp: &egui::Response, group: &[FileChange], side: Option<Side>, lo
             }
             ui.separator();
         }
+        // "Stash these files" for working changes (doc §Stash avancé).
+        if side.is_some() {
+            crate::ui_extra::stash_files_item(ui, files.iter().map(|f| f.path.clone()).collect(), acts);
+        }
         match side {
             Some(Side::Unstaged) => {
                 if ui.button(format!("Stage {what}")).clicked() {
@@ -580,6 +589,8 @@ fn composer(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
                     .desired_width(f32::INFINITY),
             );
         });
+    // Sign-off, signing, hooks, co-authors (doc §Options de commit).
+    crate::ui_extra::commit_options(ui, tab, pal, acts);
     ui.add_space(6.0);
 
     // Split button: Commit on the left (main action), Stage all on the right. Both halves
@@ -734,6 +745,7 @@ const DIFF_ROW_H: f32 = 21.0;
 /// `embedded` is set inside the file history view, which has its own header.
 pub fn diff_view(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, mode: DiffMode, embedded: bool, acts: &mut Vec<Action>) {
     let jump = tab.diff.as_mut().and_then(|d| d.jump.take());
+    let picked_lines = tab.line_pick.clone();
     let Some(dv) = &tab.diff else { return };
     let source_label = match &dv.source {
         DiffSource::Unstaged => "Unstaged changes".to_string(),
@@ -755,7 +767,28 @@ pub fn diff_view(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, mode: Diff
                 ui.label(RichText::new(format!("−{}", p.removed)).color(pal.removed).strong());
             }
         }
+        let n_picked = picked_lines.as_ref().map_or(0, |(_, l)| l.len());
+        let lines = |n: usize| format!("{n} line{}", if n == 1 { "" } else { "s" });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match dv.source {
+            DiffSource::Unstaged if n_picked > 0 => {
+                if ui.add(accent_button(&format!("Stage {}", lines(n_picked)), pal)).clicked() {
+                    acts.push(Action::StageLines { mode: HunkMode::Stage });
+                }
+                if ui.button(RichText::new(format!("Discard {}", lines(n_picked))).color(pal.removed)).on_hover_text("Saved first: Undo brings them back").clicked() {
+                    acts.push(Action::StageLines { mode: HunkMode::Discard });
+                }
+                if ui.button("Clear").clicked() {
+                    acts.push(Action::PickLine { hunk: usize::MAX, line: 0 });
+                }
+            }
+            DiffSource::Staged if n_picked > 0 => {
+                if ui.button(format!("Unstage {}", lines(n_picked))).clicked() {
+                    acts.push(Action::StageLines { mode: HunkMode::Unstage });
+                }
+                if ui.button("Clear").clicked() {
+                    acts.push(Action::PickLine { hunk: usize::MAX, line: 0 });
+                }
+            }
             DiffSource::Unstaged => {
                 if ui.add(accent_button("Stage file", pal)).clicked() {
                     acts.push(Action::Stage(dv.file.clone()));
@@ -905,7 +938,25 @@ pub fn diff_view(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, mode: Diff
                                     ui.painter().text(pos2(rect.left() + 10.0, rect.center().y), Align2::LEFT_CENTER, &parsed.hunks[hi].header, FontId::monospace(11.5), pal.muted);
                                 }
                             }
-                            DiffRow::Line(hi, li) => diff_line(ui.painter(), rect, &parsed.hunks[hi].lines[li], pal),
+                            DiffRow::Line(hi, li) => {
+                                let line = &parsed.hunks[hi].lines[li];
+                                diff_line(ui.painter(), rect, line, pal);
+                                // Staging lines (doc §Stager des lignes): click a changed line's
+                                // gutter to pick it.
+                                if hunk_tools && matches!(line.kind, LineKind::Added | LineKind::Removed) && !is_untracked {
+                                    let gutter = Rect::from_min_size(rect.min, vec2(70.0, rect.height()));
+                                    let g = ui.interact(gutter, ui.scope_id().with(("gutter", hi, li)), Sense::click()).on_hover_text("Click to pick this line, then stage or discard only the picked lines");
+                                    if picked_lines.as_ref().is_some_and(|(h, ls)| *h == hi && ls.contains(&li)) {
+                                        ui.painter().rect_filled(Rect::from_min_size(rect.min, vec2(4.0, rect.height())), CornerRadius::ZERO, pal.accent);
+                                        ui.painter().rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, pal.accent.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+                                    } else if g.hovered() {
+                                        ui.painter().rect_filled(Rect::from_min_size(rect.min, vec2(4.0, rect.height())), CornerRadius::ZERO, pal.accent.gamma_multiply(0.5));
+                                    }
+                                    if g.clicked() {
+                                        acts.push(Action::PickLine { hunk: hi, line: li });
+                                    }
+                                }
+                            }
                         }
                     }
                     start

@@ -190,9 +190,20 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
         });
 
         // Stashes (shared by every folder of the repository: say so).
+        let mut stash_acts = Vec::new();
         let shared = |_: &mut egui::Ui, title: &egui::Response| {
             if tab.snap.worktrees.len() > 1 {
                 let _ = title.clone().on_hover_text("Stashes are shared by every folder of this repository (worktrees).");
+            }
+            // "Delete all": no dialog, Undo brings them back (doc §Stash avancé).
+            if !tab.snap.stashes.is_empty() {
+                title.context_menu(|ui| {
+                    crate::util::menu_pad(ui);
+                    if ui.button(RichText::new("Delete all").color(pal.removed)).on_hover_text("git stash clear: Undo brings them back").clicked() {
+                        stash_acts.push(Action::Git { label: "All stashes deleted".into(), args: vec!["stash".into(), "clear".into()], background: false });
+                        ui.close();
+                    }
+                });
             }
         };
         section_with(ui, "stashes", Icon::Box, &format!("Stashes  ({})", tab.snap.stashes.len()), pal, shared, |ui| {
@@ -211,6 +222,10 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
                         acts.push(Action::Git { label: "Stash popped".into(), args: vec!["stash".into(), "pop".into(), r.clone()], background: false });
                         ui.close();
                     }
+                    if ui.button("Turn into a branch…").on_hover_text("git stash branch").clicked() {
+                        acts.push(Action::Dialog(Dialog::StashBranch { stash: r.clone(), name: String::new() }));
+                        ui.close();
+                    }
                     if ui.button(RichText::new("Delete stash").color(pal.removed)).clicked() {
                         acts.push(Action::Git { label: "Stash deleted".into(), args: vec!["stash".into(), "drop".into(), r.clone()], background: false });
                         ui.close();
@@ -218,6 +233,7 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
                 });
             }
         });
+        acts.extend(stash_acts);
 
         // Worktrees: this repository's other folders, each a tab (doc §Worktrees 2).
         let n = tab.snap.worktrees.len().max(1);
@@ -268,14 +284,31 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
         });
 
         // Submodules: other repositories nested in this one.
-        section(ui, "submodules", Icon::Link, &format!("Submodules  ({})", tab.snap.submodules.len()), pal, |ui| {
+        let mut sub_acts = Vec::new();
+        let plus = |ui: &mut egui::Ui, _: &egui::Response| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let b = egui::Button::new(RichText::new("+").size(15.0).strong().color(pal.text2())).frame_when_inactive(false).min_size(egui::vec2(22.0, 20.0));
+                if ui.add(b).on_hover_text("Add a submodule").clicked() {
+                    sub_acts.push(Action::Dialog(Dialog::AddSubmodule { url: String::new(), path: String::new() }));
+                }
+            });
+        };
+        section_with(ui, "submodules", Icon::Link, &format!("Submodules  ({})", tab.snap.submodules.len()), pal, plus, |ui| {
             if tab.snap.submodules.is_empty() {
                 ui.label(RichText::new("None").color(pal.muted));
             }
             for sm in &tab.snap.submodules {
+                // It moved: its folder points at another commit than the one recorded.
+                let moved = tab.snap.status.unstaged.iter().chain(&tab.snap.status.staged).any(|f| &f.path == sm);
+                let mut atoms = egui::Atoms::default();
+                atoms.push_right(RichText::new(format!("   {sm}")).color(pal.text2()));
+                if moved {
+                    atoms.push_right(RichText::new("new commits").size(10.5).color(pal.warn));
+                }
                 let resp = ui
-                    .add(egui::Button::selectable(false, RichText::new(format!("   {sm}")).color(pal.text2())).frame_when_inactive(false).truncate())
-                    .on_hover_text("Double-click to open it in a new tab");
+                    .add(egui::Button::selectable(false, atoms).frame_when_inactive(false).truncate())
+                    .on_hover_text(if moved { "Its folder is on other commits than the ones recorded here: stage it to record them
+Double-click to open it in a new tab" } else { "Double-click to open it in a new tab" });
                 if resp.double_clicked() {
                     acts.push(Action::OpenSubmodule(sm.clone()));
                 }
@@ -298,9 +331,12 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
                         acts.push(Action::OpenInExplorer(Some(path.clone())));
                         ui.close();
                     }
+                    ui.separator();
+                    crate::ui_extra::submodule_items(ui, &path, pal, acts);
                 });
             }
         });
+        acts.extend(sub_acts);
     });
 }
 
@@ -410,6 +446,7 @@ fn local_item(ui: &mut egui::Ui, tab: &RepoTab, i: usize, leaf: &str, pal: &Pale
             ui.close();
         }
         crate::ui_big::worktree_item(ui, tab, &name, RefKind::Local, acts);
+        crate::ui_extra::branch_items(ui, tab, &name, true, acts);
         if ui.button("New branch from here…").clicked() {
             acts.push(Action::Dialog(Dialog::NewBranch { at: Some(name.clone()), name: String::new(), checkout: true }));
             ui.close();
@@ -470,6 +507,7 @@ fn remote_item(ui: &mut egui::Ui, tab: &RepoTab, i: usize, remote: &str, leaf: &
         }
         crate::ui_quick::merge_items(ui, &full, &full, &current, acts);
         crate::ui_big::worktree_item(ui, tab, &full, RefKind::Remote, acts);
+        crate::ui_extra::branch_items(ui, tab, &full, false, acts);
         ui.separator();
         if ui.button("Copy name").clicked() {
             acts.push(Action::Copy(short.clone()));

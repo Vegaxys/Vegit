@@ -246,7 +246,10 @@ pub fn show(
             let c = &tab.snap.commits[row - offset];
             let picked = tab.picked_commits.contains(&c.sha);
             let selected = picked || (tab.picked_commits.is_empty() && tab.selection == Selection::Commit(c.sha.clone()));
-            let dim = (!search.is_empty() && !matches_search(c, &search)) || author_filter.as_ref().is_some_and(|a| a != &c.author);
+            // Search (by mode), author filter, and commits a bisect has ruled out are dimmed.
+            let missed = crate::ui_extra::matches(tab, c, &search).is_some_and(|m| !m);
+            let ruled_out = tab.snap.bisect.as_ref().is_some_and(|b| !b.candidates.contains(&c.sha));
+            let dim = missed || ruled_out || author_filter.as_ref().is_some_and(|a| a != &c.author);
             paint_row_bg(&painter, rect, pal, selected, resp.hovered(), row % 2 == 1);
             let text_col = if dim { pal.muted.gamma_multiply(0.6) } else { pal.text };
             let lane_color = pal.lane(tab.graph.rows[row - offset].color);
@@ -386,8 +389,23 @@ pub fn show(
             // Date and id
             painter.with_clip_rect(cols[4]).text(pos2(cols[4].left() + 10.0, rect.center().y), Align2::LEFT_CENTER, short_date_time(c.time), FontId::proportional(12.5), pal.muted);
             painter.with_clip_rect(cols[5]).text(pos2(cols[5].left() + 10.0, rect.center().y), Align2::LEFT_CENTER, git::short(&c.sha), FontId::monospace(12.0), pal.muted);
+            // Signed commits: a small mark after the SHA (green verified, amber otherwise).
+            if let Some((sig, _)) = tab.signatures.get(&c.sha) {
+                let color = match sig {
+                    'G' => pal.added,
+                    'B' | 'R' => pal.removed,
+                    _ => pal.warn,
+                };
+                let x = cols[5].left() + 74.0;
+                painter.with_clip_rect(cols[5]).circle_filled(pos2(x, rect.center().y), 4.0, color);
+            }
 
-            let resp = resp.on_hover_text_at_pointer(format!("{}\n{} · {}\nCtrl+click or Shift+click to pick several", c.summary, c.author, abs_time(c.time)));
+            let signed = tab
+                .signatures
+                .get(&c.sha)
+                .map(|(s, who)| format!("\n{}{}", crate::extras::signature_text(*s), if who.is_empty() { String::new() } else { format!(" · {who}") }))
+                .unwrap_or_default();
+            let resp = resp.on_hover_text_at_pointer(format!("{}\n{} · {}{signed}\nCtrl+click or Shift+click to pick several", c.summary, c.author, abs_time(c.time)));
             if resp.clicked() {
                 // Ctrl+click adds or removes a commit, Shift+click picks a range; a plain click
                 // goes back to one selected commit.
@@ -539,14 +557,16 @@ pub fn show(
     });
     tab.graph_hscroll = out.state.clamped_offset().x;
     tab.graph_offset = out.state.clamped_offset();
+    // Reaching the bottom loads the next 3 000 commits (doc §Historique complet).
+    let near_bottom = out.state.clamped_offset().y + out.inner_rect.height() >= out.content_size.y - ROW_H * 10.0;
+    if tab.snap.more_history && near_bottom && !tab.loading_more && !tab.is_sample() {
+        tab.loading_more = true;
+        acts.push(Action::LoadMoreHistory);
+    }
 }
 
 fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
-}
-
-fn matches_search(c: &git::Commit, q: &str) -> bool {
-    c.summary.to_lowercase().contains(q) || c.author.to_lowercase().contains(q) || c.sha.starts_with(q)
 }
 
 fn paint_row_bg(p: &egui::Painter, rect: Rect, pal: &Palette, selected: bool, hovered: bool, alt: bool) {
@@ -591,6 +611,8 @@ fn selection_menu(resp: &egui::Response, tab: &RepoTab, acts: &mut Vec<Action>) 
     resp.context_menu(|ui| {
         crate::util::menu_pad(ui);
         ui.label(RichText::new(format!("{n} commits picked")).weak());
+        crate::ui_extra::picked_menu(ui, tab, acts);
+        ui.separator();
         if ui.button(format!("Copy {n} commit SHAs")).clicked() {
             // Oldest first, the order they were made in.
             let mut picked: Vec<(usize, &String)> = tab.picked_commits.iter().filter_map(|s| tab.commit_index(s).map(|i| (i, s))).collect();
@@ -737,7 +759,9 @@ pub fn commit_menu(resp: &egui::Response, tab: &RepoTab, sha: &str, on_ref: Opti
         crate::ui_big::rewrite_menu(ui, tab, &sha, acts);
         if let Some(b) = branch.as_ref().filter(|b| b.kind != RefKind::Tag) {
             crate::ui_big::worktree_item(ui, tab, &b.name, b.kind.clone(), acts);
+            crate::ui_extra::branch_items(ui, tab, &b.name, b.kind == RefKind::Local, acts);
         }
+        crate::ui_extra::commit_items(ui, tab, &sha, acts);
         ui.menu_button("Reset current branch to here", |ui| {
             crate::util::menu_pad(ui);
             if ui.button("Soft: keep all changes staged").clicked() {

@@ -33,6 +33,19 @@ mod safety_net;
 #[path = "app_big.rs"]
 mod big;
 pub use big::{ConflictView, HistoryEdit, RewriteKind, WorktreeForm, other_folders};
+#[path = "app_extra.rs"]
+mod extra;
+pub use extra::{CompareView, LinePick, SearchMode, content_hits};
+
+/// What the worker found when comparing two commits or two branches.
+#[derive(Clone, Debug)]
+pub struct CompareResult {
+    pub files: Vec<FileChange>,
+    pub only_a: Vec<(String, String)>,
+    pub only_b: Vec<(String, String)>,
+    pub from: String,
+    pub to: String,
+}
 pub use quick::{PushForm, RemoteCheck, RemoteForm};
 
 pub const SETTINGS_KEY: &str = "vegit_settings";
@@ -44,6 +57,8 @@ pub struct Settings {
     pub theme: ThemeChoice,
     pub recent: Vec<String>,
     pub open_tabs: Vec<String>,
+    /// The commit panel's "More options" per repository folder.
+    pub commit_options: HashMap<String, crate::extras::CommitOptions>,
     /// File lists as a folder tree instead of full paths.
     pub tree_view: bool,
     /// Hunk, inline or split view of changes.
@@ -87,6 +102,7 @@ impl Default for Settings {
             theme: ThemeChoice::default(),
             recent: Vec::new(),
             open_tabs: Vec::new(),
+            commit_options: HashMap::new(),
             tree_view: false,
             diff_mode: DiffMode::default(),
             accent: None,
@@ -246,6 +262,21 @@ pub struct RepoTab {
     pub conflict: Option<ConflictView>,
     /// LFS locks on the server, once asked.
     pub lfs_locks: Option<Result<Vec<crate::lfs::Lock>, String>>,
+    /// Two commits or two branches compared in the detail panel.
+    pub compare: Option<CompareView>,
+    pub search_mode: SearchMode,
+    /// Last content search: (query, mode, hits once known).
+    pub search_hits: Option<(String, SearchMode, Option<Result<HashSet<String>, String>>)>,
+    /// Lines picked in the diff gutter, to stage only them.
+    pub line_pick: Option<LinePick>,
+    /// Commit to select once the next reload has loaded it.
+    pub select_after: Option<String>,
+    /// Signatures of recent commits: sha -> (git's letter, signer).
+    pub signatures: HashMap<String, (char, String)>,
+    /// The commit panel's "More options" (remembered per repository).
+    pub commit_opts: crate::extras::CommitOptions,
+    /// More history was asked for and is loading.
+    pub loading_more: bool,
     pub file_view: Option<FileView>,
     /// Files picked in the working-changes lists (Ctrl/Shift+click), all in one list.
     pub picked: HashSet<String>,
@@ -304,6 +335,14 @@ impl RepoTab {
             history_edit: None,
             conflict: None,
             lfs_locks: None,
+            compare: None,
+            search_mode: SearchMode::default(),
+            search_hits: None,
+            line_pick: None,
+            select_after: None,
+            signatures: HashMap::new(),
+            commit_opts: Default::default(),
+            loading_more: false,
             file_view: None,
             picked: HashSet::new(),
             picked_list: ListId::Unstaged,
@@ -327,6 +366,7 @@ impl RepoTab {
     fn set_snapshot(&mut self, snap: Snapshot, graph: GraphLayout) {
         let first = self.loading;
         self.loading = false;
+        self.loading_more = false;
         self.graph = graph;
         self.refs_by_sha = snap.refs_by_sha();
         self.snap = snap;
@@ -407,6 +447,19 @@ pub enum Dialog {
     RemoveWorktree { path: PathBuf, files: Vec<String> },
     /// "Set up LFS for Unity": patterns one per line, editable before applying.
     LfsPreset { patterns: String, lockable: String },
+    /// "Move only my commits onto": `options` are branch names.
+    Onto { branch: String, options: Vec<String>, new_base: usize, old_base: usize },
+    AddSubmodule { url: String, path: String },
+    /// Ignored files `clean -X` would delete, with their size.
+    CleanIgnored { files: Vec<String>, size: u64 },
+    /// "Choose folders to download": every folder and whether it is kept.
+    Sparse { folders: Vec<(String, bool)> },
+    /// A dropped patch file: what it changes, or why it does not apply.
+    ApplyPatch { file: PathBuf, preview: Result<String, String> },
+    StashBranch { stash: String, name: String },
+    BisectRun { command: String },
+    /// "Search files at this commit" (git grep).
+    Grep { sha: String, query: String, results: Option<Result<Vec<(String, u32, String)>, String>> },
 }
 
 /// The "Create pull request" window: from a repository and branch into another.
@@ -591,6 +644,43 @@ pub enum Action {
     LfsLock(String),
     LfsUnlock { path: String, force: bool },
     RefreshLocks,
+    // Phases 4 and 5 (app_extra.rs).
+    /// Picks or unpicks a changed line in the diff gutter (`hunk == usize::MAX` clears).
+    PickLine { hunk: usize, line: usize },
+    StageLines { mode: HunkMode },
+    CompareBranches { a: String, b: String },
+    CloseCompare,
+    ContentSearch,
+    LoadMoreHistory,
+    GoToCommit(String),
+    StashFiles(Vec<String>),
+    CopyCommits { shas: Vec<String>, mention: bool, no_commit: bool },
+    StartBisect(String),
+    BisectAnswer(String),
+    BisectStop,
+    BisectRun(String),
+    OpenOnto(String),
+    MoveOnto { branch: String, new_base: String, old_base: String },
+    AddSubmodule { url: String, path: String },
+    SubmoduleUpdate(String),
+    SubmoduleSync(String),
+    SubmoduleRemove(String),
+    ListHeads(String),
+    LoadFullHistory,
+    CleanNew,
+    OpenCleanIgnored,
+    CleanIgnored,
+    OpenSparse,
+    /// `None`: download everything again.
+    SetSparse(Option<Vec<String>>),
+    SavePatch(Vec<String>),
+    OpenPatch(PathBuf),
+    ApplyPatch(PathBuf),
+    SpeedUp,
+    KeepFast,
+    CheckRepo,
+    SetCommitOptions(crate::extras::CommitOptions),
+    GrepAt { sha: String, query: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -623,6 +713,8 @@ enum OpKind {
     RemoteTags(String),
     /// LFS locks changed: read them again.
     Locks,
+    /// A bisect answer: the output says what is next.
+    Bisect,
 }
 
 /// Work for the worker thread, processed strictly in order.
@@ -640,6 +732,8 @@ enum Task {
     History { repo: PathBuf, from: String },
     /// A history edit, planned and run on the worker, recorded for Undo.
     Rewrite { repo: PathBuf, kind: RewriteKind, what: String, ok_text: String },
+    /// Two commits or two branches for the compare panel.
+    Compare { repo: PathBuf, a: String, b: String, branches: bool },
     /// Reads a conflicted file for the cards.
     Conflict { repo: PathBuf, path: String, pending: Option<git::PendingOp> },
     /// Several steps run as one action, recorded for Undo when `what` is given.
@@ -679,6 +773,13 @@ enum JobDone {
     WorktreeAdded { repo: PathBuf, path: PathBuf, result: Result<(), String>, open_tab: bool },
     /// Files changed by the commits a push just sent (for the Unlock offer).
     PushedFiles { tab_path: PathBuf, files: Vec<String> },
+    Compare { tab_path: PathBuf, result: Result<CompareResult, String> },
+    Search { tab_path: PathBuf, query: String, result: Result<HashSet<String>, String> },
+    Heads { url: String, result: Result<Vec<String>, String> },
+    Ignored { files: Vec<String>, size: u64 },
+    Maintenance { result: Result<String, String> },
+    Grep { sha: String, query: String, result: Result<Vec<(String, u32, String)>, String> },
+    Signatures { tab_path: PathBuf, sigs: HashMap<String, (char, String)> },
 }
 
 pub struct HomeForm {
@@ -686,6 +787,12 @@ pub struct HomeForm {
     pub clone_url: String,
     pub clone_dest: String,
     pub init_path: String,
+    // Clone options (under "More options").
+    pub clone_branch: String,
+    pub clone_recent: bool,
+    pub clone_submodules: bool,
+    /// Branches of the URL, once listed.
+    pub heads: Option<Result<Vec<String>, String>>,
 }
 
 pub struct ScreenshotJob {
@@ -760,6 +867,10 @@ impl VegitApp {
                 clone_url: String::new(),
                 clone_dest: dirs_home().join("Projects").display().to_string(),
                 init_path: String::new(),
+                clone_branch: String::new(),
+                clone_recent: false,
+                clone_submodules: true,
+                heads: None,
             },
             busy: Vec::new(),
             pending: 0,
@@ -900,6 +1011,26 @@ impl VegitApp {
                         app.actions.push(Action::Dialog(Dialog::Worktree(WorktreeForm { branch: "feature/search".into(), remote: false, new_from: None, path: "C:/Projects/sample-project-feature-search".into(), open_tab: true, unity: true })));
                     }
                     "lfs" => app.actions.push(Action::OpenLfsPreset),
+                    "compare" => {
+                        let only: Vec<(String, String)> = t.snap.commits.iter().skip(2).take(3).map(|c| (c.sha.clone(), c.summary.clone())).collect();
+                        t.compare = Some(CompareView {
+                            title: "main ↔ feature/search".into(),
+                            a_name: "main".into(),
+                            b_name: "feature/search".into(),
+                            files: Some(demo::files_for("")),
+                            only_b: only,
+                            only_a: t.snap.commits.iter().take(2).map(|c| (c.sha.clone(), c.summary.clone())).collect(),
+                            branches: true,
+                            ..Default::default()
+                        });
+                    }
+                    "bisect" => {
+                        let candidates = t.snap.commits.iter().take(6).map(|c| c.sha.clone()).collect();
+                        t.snap.bisect = Some(crate::extras::Bisect { candidates, tested: 2, steps_left: 3 });
+                    }
+                    "options" => {
+                        t.commit_opts = crate::extras::CommitOptions { open: true, signoff: true, coauthors: vec!["Noor Haddad <noor@example.com>".into()], ..Default::default() };
+                    }
                     "toast" => {
                         let undo = Action::Git { label: String::new(), args: Vec::new(), background: false };
                         app.toasts.push(Toast { text: "Deleted feature/old-login".into(), kind: ToastKind::Success, until: 1e9, action: Some(("Undo".into(), undo)) });
@@ -1023,7 +1154,9 @@ impl VegitApp {
         if remember {
             self.remember_recent(&root);
         }
-        self.tabs.push(RepoTab::new(Some(root.clone())));
+        let mut tab = RepoTab::new(Some(root.clone()));
+        tab.commit_opts = self.settings.commit_options.get(&root.display().to_string()).cloned().unwrap_or_default();
+        self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.show_home = false;
         self.sync_open_tabs();
@@ -1129,6 +1262,10 @@ impl VegitApp {
                                 self.spawn_locks(ctx, tab_path.clone());
                             }
                             self.after_op(ctx, &tab_path, &kind);
+                            if matches!(kind, OpKind::Bisect) {
+                                let out = result.as_ref().map(String::as_str).unwrap_or_default().to_string();
+                                self.after_bisect(ctx, &out);
+                            }
                             if matches!(kind, OpKind::Commit) {
                                 if let Some(t) = self.tab_by_path(&tab_path) {
                                     t.summary.clear();
@@ -1312,6 +1449,50 @@ impl VegitApp {
                     }
                 }
                 JobDone::WorktreeAdded { repo, path, result, open_tab } => self.on_worktree_added(ctx, repo, path, result, open_tab),
+                JobDone::Compare { tab_path, result } => {
+                    self.pending = self.pending.saturating_sub(1);
+                    self.on_compare(&tab_path, result);
+                }
+                JobDone::Search { tab_path, query, result } => {
+                    if let Some(t) = self.tab_by_path(&tab_path) {
+                        if let Some((q, _, hits)) = t.search_hits.as_mut() {
+                            if *q == query {
+                                *hits = Some(result);
+                            }
+                        }
+                    }
+                }
+                JobDone::Heads { url, result } => {
+                    if self.home.clone_url.trim() == url {
+                        self.home.heads = Some(result);
+                    }
+                }
+                JobDone::Ignored { files, size } => {
+                    if files.is_empty() {
+                        self.toast(ctx, "No ignored files to delete.", ToastKind::Info);
+                    } else {
+                        self.dialog = Some(Dialog::CleanIgnored { files, size });
+                    }
+                }
+                JobDone::Grep { sha, query, result } => {
+                    if let Some(Dialog::Grep { sha: s, query: q, results, .. }) = self.dialog.as_mut() {
+                        if *s == sha && q.trim() == query {
+                            *results = Some(result);
+                        }
+                    }
+                }
+                JobDone::Maintenance { result } => {
+                    self.busy.retain(|b| b != "Speeding up");
+                    match result {
+                        Ok(t) => self.toast(ctx, t, ToastKind::Success),
+                        Err(e) => self.toast(ctx, e, ToastKind::Error),
+                    }
+                }
+                JobDone::Signatures { tab_path, sigs } => {
+                    if let Some(t) = self.tab_by_path(&tab_path) {
+                        t.signatures = sigs;
+                    }
+                }
                 JobDone::PushedFiles { tab_path, files } => self.on_pushed_files(ctx, &tab_path, files),
                 JobDone::RemoteChecked { url, result } => self.on_remote_checked(url, result),
                 JobDone::RemoteTags { tab_path, remote, result } => {
@@ -1408,9 +1589,20 @@ impl VegitApp {
                 follow_up.push(Action::Select(Selection::Commit(sha)));
             }
         }
+        // A commit asked for before it was loaded (search, link, bisect result).
+        if let Some(sha) = t.select_after.take() {
+            match t.commit_index(&sha) {
+                Some(i) => {
+                    t.scroll_to = Some(i + usize::from(t.has_wip_row()));
+                    follow_up.push(Action::Select(Selection::Commit(sha)));
+                }
+                None => t.select_after = Some(sha),
+            }
+        }
         if load_prs {
             self.spawn_prs(ctx, path.to_path_buf(), false);
         }
+        self.spawn_signatures(ctx, path.to_path_buf());
         let was_active = self.tabs.get(self.active).and_then(|t| t.path.as_deref()) == Some(path) && !self.show_home;
         if was_active {
             // Re-requesting a diff keeps the old one on screen until the new one arrives.
@@ -1440,18 +1632,26 @@ impl VegitApp {
                 self.select(sel);
             }
             Action::SelectRef(target) => {
+                let mut load_further = false;
                 if let Some(tab) = self.tab() {
                     if let Some(i) = tab.commit_index(&target) {
                         tab.scroll_to = Some(i + usize::from(tab.has_wip_row()));
                         tab.diff = None;
-                        self.select(Selection::Commit(target));
+                        self.select(Selection::Commit(target.clone()));
+                    } else {
+                        // Older than what is loaded: load the history down to it.
+                        load_further = !tab.is_sample() && target.len() >= 7 && target.bytes().all(|b| b.is_ascii_hexdigit());
                     }
+                }
+                if load_further {
+                    self.handle_one(ctx, Action::GoToCommit(target));
                 }
             }
             Action::OpenDiff(source, file) => {
                 // A conflicted file opens as cards, one per conflict (doc §Conflits).
                 let conflicted = file.state == FileState::Conflicted && source == DiffSource::Unstaged;
                 if let Some(t) = self.tab() {
+                    t.line_pick = None;
                     if !conflicted {
                         t.conflict = None;
                     }
@@ -1827,9 +2027,10 @@ impl VegitApp {
                 self.busy.push("Clone".into());
                 let tx = self.jobs_tx.clone();
                 let ctx2 = ctx.clone();
+                let args = crate::extras::clone_args(&url, &dest, Some(self.home.clone_branch.trim()), self.home.clone_recent, self.home.clone_submodules);
                 std::thread::spawn(move || {
-                    let d = dest.display().to_string();
-                    let result = git::run(&parent, &["clone", &url, &d]).map_err(|e| e.0);
+                    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                    let result = git::run(&parent, &refs).map_err(|e| e.0);
                     let _ = tx.send(JobDone::Cloned { dest, result });
                     ctx2.request_repaint();
                 });
@@ -2037,7 +2238,10 @@ impl VegitApp {
             self.toast(ctx, "Nothing is staged. Stage some files first.", ToastKind::Info);
             return;
         }
+        // "More options": sign-off, signing, hooks, co-author trailers (doc §Options de commit).
+        let (extra_args, description) = self.commit_extras(description);
         let mut args: Vec<String> = vec!["commit".into()];
+        args.extend(extra_args);
         if amend {
             args.push("--amend".into());
             if summary.is_empty() {
@@ -2056,6 +2260,11 @@ impl VegitApp {
 
     pub fn save_settings(&mut self, storage: &mut dyn eframe::Storage) {
         self.sync_open_tabs();
+        for t in &self.tabs {
+            if let Some(p) = &t.path {
+                self.settings.commit_options.insert(p.display().to_string(), t.commit_opts.clone());
+            }
+        }
         eframe::set_value(storage, SETTINGS_KEY, &self.settings);
     }
 }
@@ -2156,6 +2365,10 @@ fn run_task(task: Task) -> JobDone {
                 Err(e) => (Err(e), None),
             };
             JobDone::Op { tab_path: repo, label: "Edit history".into(), ok_text: Some(ok_text), result, kind: OpKind::Plain, from_worker: true, journal }
+        }
+        Task::Compare { repo, a, b, branches } => {
+            let result = extra::compare(&repo, &a, &b, branches);
+            JobDone::Compare { tab_path: repo, result }
         }
         Task::Conflict { repo, path, pending } => {
             let result = big::read_conflict(&repo, &path, pending);

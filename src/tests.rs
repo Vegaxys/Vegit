@@ -892,3 +892,265 @@ fn an_edit_that_stops_midway_records_no_undo() {
     g(&dir, &["rebase", "--abort"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Phases 4 and 5: lines, comparing, searching, paging, stash, copying commits, bisect,
+// rebase --onto, submodules, clone, cleanup, sparse-checkout, patches, signatures,
+// maintenance and commit options.
+// ---------------------------------------------------------------------------------------------
+
+use crate::extras;
+
+/// A file with three changed lines; staging two of them leaves the third unstaged.
+#[test]
+fn chosen_lines_are_staged_and_unstaged() {
+    let dir = temp_repo("lines");
+    write(&dir, "a.txt", "one\ntwo\nthree\nfour\n");
+    g(&dir, &["add", "."]);
+    g(&dir, &["commit", "-q", "-m", "base"]);
+    write(&dir, "a.txt", "one\nTWO\nthree\nFOUR\nfive\n");
+    let diff = g(&dir, &["diff", "-U3", "--", "a.txt"]);
+    let parsed = crate::diff::ParsedDiff::parse(&diff);
+    let patch = parsed.hunk_patch(0).unwrap();
+    // Body lines: " one", "-two", "+TWO", " three", "-four", "+FOUR", "+five".
+    let partial = extras::line_patch(&patch, &[1, 2], false).unwrap();
+    git::run_with_input(&dir, &["apply", "--cached", "-"], &partial).unwrap();
+    assert_eq!(g(&dir, &["show", ":a.txt"]).replace("\r\n", "\n"), "one\nTWO\nthree\nfour\n");
+    // Unstage it again from the staged diff.
+    let staged = crate::diff::ParsedDiff::parse(&g(&dir, &["diff", "--cached", "-U3", "--", "a.txt"]));
+    let sp = staged.hunk_patch(0).unwrap();
+    let back = extras::line_patch(&sp, &[1, 2], true).unwrap();
+    git::run_with_input(&dir, &["apply", "--cached", "-R", "-"], &back).unwrap();
+    assert!(g(&dir, &["diff", "--cached", "--name-only"]).trim().is_empty());
+    assert!(extras::line_patch(&patch, &[0], false).is_none(), "a context line alone changes nothing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two commits compared, two branches compared (commits only on each, files since the fork).
+#[test]
+fn commits_and_branches_are_compared() {
+    let dir = repo_four_commits("compare");
+    let (c1, c4) = (sha_of(&dir, "c1"), sha_of(&dir, "c4"));
+    let files = extras::compare_files(&dir, &c1, &c4).unwrap();
+    assert_eq!(files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["b.txt", "c.txt", "d.txt"]);
+    g(&dir, &["switch", "-q", "-c", "feature", &sha_of(&dir, "c2")]);
+    write(&dir, "f.txt", "f\n");
+    g(&dir, &["add", "."]);
+    g(&dir, &["commit", "-q", "-m", "f"]);
+    assert_eq!(extras::only_on(&dir, "main", "feature").len(), 1);
+    assert_eq!(extras::only_on(&dir, "feature", "main").len(), 2);
+    let base = extras::merge_base(&dir, "main", "feature").unwrap();
+    assert_eq!(base, sha_of(&dir, "c2"));
+    let changed = extras::compare_files(&dir, &base, "feature").unwrap();
+    assert_eq!(changed.len(), 1, "what feature changed since the fork");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Changed text (`log -S`), file paths, and `git grep` at a commit.
+#[test]
+fn content_is_searched() {
+    let dir = repo_four_commits("search");
+    write(&dir, "b.txt", "needle here\n");
+    g(&dir, &["commit", "-q", "-am", "add needle"]);
+    let hits = extras::search_changed_text(&dir, "needle").unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(hits.contains(&sha_of(&dir, "add needle")));
+    assert_eq!(extras::search_file_path(&dir, "C.TX").unwrap().len(), 1, "case-insensitive path search");
+    let found = extras::grep_at(&dir, &head(&dir), "NEEDLE").unwrap();
+    assert_eq!(found, vec![("b.txt".to_string(), 1, "needle here".to_string())]);
+    assert!(extras::grep_at(&dir, &head(&dir), "absent").unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Paging: a higher limit loads more; a commit's position tells how far to load.
+#[test]
+fn history_loads_further_on_demand() {
+    let dir = repo_four_commits("paging");
+    assert_eq!(extras::position_of(&dir, &sha_of(&dir, "c1")), Some(3));
+    assert_eq!(git::commit_limit(&dir), git::MAX_COMMITS);
+    git::set_commit_limit(&dir, git::MAX_COMMITS * 2);
+    assert_eq!(git::commit_limit(&dir), git::MAX_COMMITS * 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Stash some files only, keep the staged ones, turn a stash into a branch, delete all (undone).
+#[test]
+fn advanced_stash() {
+    let dir = repo_four_commits("stash2");
+    write(&dir, "a.txt", "a changed\n");
+    write(&dir, "b.txt", "b changed\n");
+    run_args(&dir, extras::stash_files_args(&["a.txt".into()], "only a"));
+    assert!(g(&dir, &["status", "--porcelain"]).contains("b.txt"), "b stays");
+    assert!(!g(&dir, &["status", "--porcelain"]).contains("a.txt"));
+    g(&dir, &["add", "b.txt"]);
+    g(&dir, &["stash", "push", "-q", "--keep-index", "-m", "keep staged"]);
+    assert!(g(&dir, &["diff", "--cached", "--name-only"]).contains("b.txt"), "--keep-index leaves the staged file");
+    g(&dir, &["reset", "-q", "--hard"]);
+    let e = recorded(&dir, &["stash", "clear"]);
+    assert_eq!(e.what, "delete all stashes");
+    undo(&dir, &e);
+    let list = g(&dir, &["stash", "list"]);
+    assert!(list.lines().next().unwrap().contains("keep staged") && list.contains("only a"), "{list}");
+    run_args(&dir, extras::stash_branch_args("from-stash", "stash@{1}"));
+    assert_eq!(g(&dir, &["symbolic-ref", "--short", "HEAD"]).trim(), "from-stash");
+    assert_eq!(text(&dir, "a.txt"), "a changed\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Several commits copied in order, with the original mentioned.
+#[test]
+fn several_commits_are_copied_oldest_first() {
+    let dir = repo_four_commits("multipick");
+    let (c3, c4) = (sha_of(&dir, "c3"), sha_of(&dir, "c4"));
+    g(&dir, &["switch", "-q", "-c", "other", &sha_of(&dir, "c2")]);
+    run_args(&dir, extras::cherry_pick_args(&[c3.clone(), c4], true, false));
+    assert_eq!(subjects(&dir)[..2], ["c4".to_string(), "c3".to_string()]);
+    assert!(g(&dir, &["log", "-n", "1", "--skip", "1", "--format=%B"]).contains(&format!("cherry picked from commit {c3}")));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Bisect: the state is read, the answers narrow it down, the first broken commit is named.
+#[test]
+fn bisect_finds_the_first_broken_commit() {
+    let dir = repo_four_commits("bisect");
+    let (c1, c3) = (sha_of(&dir, "c1"), sha_of(&dir, "c3"));
+    g(&dir, &["bisect", "start", "HEAD", &c1]);
+    let st = extras::bisect_state(&dir).unwrap();
+    assert_eq!(st.candidates.len(), 3);
+    // "broken" means c.txt exists: c3 is the first broken one.
+    let mut found = None;
+    for _ in 0..4 {
+        let verdict = if dir.join("c.txt").exists() { "bad" } else { "good" };
+        let out = g(&dir, &["bisect", verdict]);
+        if let extras::BisectOutcome::Found(sha) = extras::parse_bisect(&out) {
+            found = Some(sha);
+            break;
+        }
+    }
+    assert_eq!(found, Some(c3));
+    g(&dir, &["bisect", "reset"]);
+    assert!(extras::bisect_state(&dir).is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// "Move only my commits": a branch built on another one moves onto main alone.
+#[test]
+fn only_my_commits_move_onto_another_base() {
+    let dir = repo_one_commit("onto");
+    g(&dir, &["switch", "-q", "-c", "feature-a"]);
+    write(&dir, "a2.txt", "a\n");
+    g(&dir, &["add", "."]);
+    g(&dir, &["commit", "-q", "-m", "a work"]);
+    g(&dir, &["switch", "-q", "-c", "feature-b"]);
+    write(&dir, "b2.txt", "b\n");
+    g(&dir, &["add", "."]);
+    g(&dir, &["commit", "-q", "-m", "b work"]);
+    assert_eq!(extras::count_between(&dir, "feature-a", "feature-b"), 1);
+    run_args(&dir, extras::onto_args("main", "feature-a", "feature-b"));
+    assert_eq!(subjects(&dir), ["b work", "first"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Clone options, shallow detection, cleanup with its backup, ignored files and their size.
+#[test]
+fn clone_options_and_cleanup() {
+    let src = repo_four_commits("clonesrc");
+    let dest = src.parent().unwrap().join(format!("vegit-test-clone-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    let url = format!("file://{}", src.display().to_string().replace('\\', "/"));
+    let args = extras::clone_args(&url, &dest, Some("main"), true, true);
+    assert!(args.contains(&"--depth".to_string()) && args.contains(&"--recurse-submodules".to_string()));
+    run_args(src.parent().unwrap(), args);
+    assert!(extras::is_shallow(&dest));
+    assert_eq!(extras::remote_heads(&src, &url).unwrap(), ["main"]);
+
+    write(&src, "junk.tmp", "x");
+    write(&src, ".gitignore", "*.log\n");
+    write(&src, "big.log", &"y".repeat(2000));
+    let (result, entry) = safety::run_recorded(&src, &extras::clean_steps(&["junk.tmp".into(), ".gitignore".into()]), Some(("delete new files".into(), ResetMode::Keep)));
+    result.unwrap();
+    assert!(!src.join("junk.tmp").exists() && src.join("big.log").exists(), "ignored files are kept");
+    undo(&src, &entry.unwrap());
+    assert!(src.join("junk.tmp").exists());
+    let (ignored, size) = extras::ignored(&src);
+    assert_eq!(ignored, ["big.log"]);
+    assert_eq!(size, 2000);
+    cleanup(&[&src, &dest]);
+}
+
+/// Sparse-checkout: the folders listed, a choice applied, then everything back.
+#[test]
+fn sparse_checkout_keeps_chosen_folders() {
+    let dir = temp_repo("sparse");
+    for f in ["Assets/Art/a.txt", "Assets/Code/b.txt", "Docs/c.txt"] {
+        std::fs::create_dir_all(dir.join(f).parent().unwrap()).unwrap();
+        write(&dir, f, "x\n");
+    }
+    g(&dir, &["add", "."]);
+    g(&dir, &["commit", "-q", "-m", "tree"]);
+    let mut fs = extras::folders(&dir);
+    fs.sort();
+    assert_eq!(fs, ["Assets", "Assets/Art", "Assets/Code", "Docs"]);
+    run_args(&dir, extras::sparse_set_args(&["Assets/Code".into()]));
+    assert_eq!(extras::sparse_folders(&dir), Some(vec!["Assets/Code".to_string()]));
+    assert!(!dir.join("Docs/c.txt").exists());
+    g(&dir, &["sparse-checkout", "disable"]);
+    assert!(dir.join("Docs/c.txt").exists());
+    assert_eq!(extras::sparse_folders(&dir), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A commit saved as a patch file is previewed and applied elsewhere, keeping its author.
+#[test]
+fn patches_are_saved_previewed_and_applied() {
+    let dir = repo_four_commits("patch");
+    let c4 = sha_of(&dir, "c4");
+    let patch = extras::format_patch(&dir, &[c4]).unwrap();
+    let file = dir.join("c4.patch");
+    std::fs::write(&file, &patch).unwrap();
+    g(&dir, &["reset", "-q", "--hard", "HEAD~1"]);
+    let preview = extras::patch_preview(&dir, &file).unwrap();
+    assert!(preview.contains("d.txt"), "{preview}");
+    let args = extras::patch_apply_args(&file);
+    assert_eq!(args[0], "am");
+    run_args(&dir, args);
+    assert_eq!(subjects(&dir)[0], "c4");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Unsigned history has no badge; maintenance measures and checks; commit options build
+/// arguments and co-author trailers.
+#[test]
+fn signatures_maintenance_and_commit_options() {
+    let dir = repo_four_commits("maint");
+    assert!(extras::signatures(&dir, 10).is_empty());
+    assert_eq!(extras::signature_text('G'), "Signed, verified");
+    assert!(extras::repo_size(&dir) > 0);
+    g(&dir, &["gc", "-q"]);
+    assert!(extras::check(&dir).unwrap().is_empty(), "a healthy repository has no problems");
+    let opts = extras::CommitOptions { signoff: true, no_verify: true, coauthors: vec!["Ana <ana@example.com>".into()], ..Default::default() };
+    assert_eq!(opts.args(), ["--signoff", "--no-verify"]);
+    assert_eq!(opts.description("Body"), "Body\n\nCo-authored-by: Ana <ana@example.com>");
+    assert_eq!(opts.description(""), "Co-authored-by: Ana <ana@example.com>");
+    let snap = git::load_snapshot(&dir).unwrap();
+    assert!(extras::authors(&snap.commits, None).len() == 1);
+    assert!(extras::authors(&snap.commits, Some(&snap.commits[0].email)).is_empty(), "not myself");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A submodule added, updated, synced and removed in one action.
+#[test]
+fn submodules_are_added_and_removed() {
+    let lib = repo_one_commit("sublib");
+    let dir = repo_one_commit("subhost");
+    let url = format!("file://{}", lib.display().to_string().replace('\\', "/"));
+    g(&dir, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", &url, "libs/lib"]);
+    g(&dir, &["commit", "-q", "-m", "add lib"]);
+    run_args(&dir, extras::submodule_sync_args("libs/lib"));
+    let (result, _) = safety::run_recorded(&dir, &extras::submodule_remove_steps(&dir, "libs/lib"), None);
+    result.unwrap();
+    assert!(!dir.join("libs/lib").exists());
+    assert!(!dir.join(".git/modules/libs/lib").exists());
+    assert!(g(&dir, &["diff", "--cached", "--name-only"]).contains(".gitmodules"));
+    cleanup(&[&lib, &dir]);
+}

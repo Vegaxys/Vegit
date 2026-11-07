@@ -158,6 +158,14 @@ pub struct Snapshot {
     /// Worktrees whose folder had vanished and were just pruned.
     pub pruned: usize,
     pub lfs: crate::lfs::LfsInfo,
+    /// The graph stopped at its limit: there is older history to load.
+    pub more_history: bool,
+    /// A bisect is in progress.
+    pub bisect: Option<crate::extras::Bisect>,
+    /// Cloned with only recent history.
+    pub shallow: bool,
+    /// Folders kept by sparse-checkout, `None` when everything is there.
+    pub sparse: Option<Vec<String>>,
 }
 
 impl Snapshot {
@@ -417,6 +425,10 @@ pub fn load_snapshot(dir: &Path) -> GitResult<Snapshot> {
     }
     let changed: Vec<String> = snap.status.unstaged.iter().chain(&snap.status.staged).map(|f| f.path.clone()).collect();
     snap.lfs = crate::lfs::info(dir, &changed);
+    snap.more_history = snap.commits.len() >= commit_limit(dir);
+    snap.bisect = crate::extras::bisect_state(dir);
+    snap.shallow = git_dir.join("shallow").exists();
+    snap.sparse = crate::extras::sparse_folders(dir);
     snap.pending = pending_in(&git_dir);
     Ok(snap)
 }
@@ -441,8 +453,22 @@ fn pending_in(git_dir: &Path) -> Option<PendingOp> {
     }
 }
 
+/// How many commits the graph loads for a repository: 3 000 by default, more once the
+/// person scrolls to the bottom or looks for an older commit (doc §Historique complet).
+static LIMITS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, usize>>> = std::sync::OnceLock::new();
+
+pub fn commit_limit(dir: &Path) -> usize {
+    LIMITS.get_or_init(Default::default).lock().map(|m| m.get(dir).copied().unwrap_or(MAX_COMMITS)).unwrap_or(MAX_COMMITS)
+}
+
+pub fn set_commit_limit(dir: &Path, n: usize) {
+    if let Ok(mut m) = LIMITS.get_or_init(Default::default).lock() {
+        m.insert(dir.to_path_buf(), n.max(MAX_COMMITS));
+    }
+}
+
 fn load_commits(dir: &Path) -> GitResult<Vec<Commit>> {
-    let limit = format!("-n{MAX_COMMITS}");
+    let limit = format!("-n{}", commit_limit(dir));
     // Branches, remotes, tags and HEAD, but not refs/stash: stashes live in the sidebar.
     let out = run(
         dir,

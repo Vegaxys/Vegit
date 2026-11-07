@@ -18,7 +18,7 @@ pub fn width(dialog: &Dialog) -> Option<f32> {
     match dialog {
         Dialog::CommitMessage { .. } | Dialog::Fixup { .. } | Dialog::RemoveWorktree { .. } => Some(520.0),
         Dialog::Worktree(_) | Dialog::LfsPreset { .. } => Some(480.0),
-        _ => None,
+        d => crate::ui_extra::width(d),
     }
 }
 
@@ -433,7 +433,7 @@ pub fn dialog(ui: &mut egui::Ui, dialog: &mut Dialog, tab: Option<&RepoTab>, pal
             }
             false
         }
-        _ => false,
+        d => crate::ui_extra::dialog(ui, d, tab, pal, acts),
     }
 }
 

@@ -265,7 +265,7 @@ impl VegitApp {
                     self.spawn_locks(ctx, repo);
                 }
             }
-            _ => {}
+            other => self.handle_extra(ctx, other),
         }
     }
 

@@ -136,6 +136,10 @@ pub fn snapshot() -> Snapshot {
         ],
         pruned: 0,
         lfs: crate::lfs::LfsInfo { used: true, installed: true, tracked: ["assets/empty-state.svg".to_string()].into_iter().collect(), unity: true },
+        more_history: false,
+        bisect: None,
+        shallow: false,
+        sparse: None,
     }
 }
 

@@ -68,6 +68,8 @@ impl eframe::App for VegitApp {
 
         self.dialogs(&ctx, &pal);
         self.toasts_ui(&ctx, &pal);
+        // A .patch file dropped on the window opens its preview.
+        self.dropped_files(&ctx);
         // Branch drag and drop: the dragged name follows the pointer; after a drop, its menu.
         crate::ui_quick::drag_ghost(&ctx, &pal);
         if let Some(menu) = self.drop_menu.clone() {
@@ -271,7 +273,9 @@ impl VegitApp {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
                         ui.set_min_height(HEADER_H);
-                        ui.label(RichText::new(&tab.name).size(17.0).strong());
+                        // The repository's name opens its menu (folders, history, maintenance).
+                        let name = ui.add(egui::Label::new(RichText::new(&tab.name).size(17.0).strong()).sense(Sense::click())).on_hover_text("Repository menu");
+                        egui::Popup::menu(&name).show(|ui| crate::ui_extra::repo_menu(ui, tab, &mut acts));
                         let branch = tab.snap.head_branch.clone().unwrap_or_else(|| {
                             tab.snap.head_sha.as_deref().map_or("no commits".into(), |h| format!("detached {}", git::short(h)))
                         });
@@ -401,8 +405,10 @@ impl VegitApp {
                             if icons::icon_button(ui, Icon::Refresh, pal.text, pal.card, pal.hover).on_hover_text("Refresh (F5)").clicked() {
                                 acts.push(Action::Refresh);
                             }
-                            let width = ui.available_width().clamp(60.0, 240.0);
-                            crate::util::search_field(ui, &mut tab.search, "Find commits", width, pal);
+                            let width = (ui.available_width() - 130.0).clamp(60.0, 240.0);
+                            let field = crate::util::search_field(ui, &mut tab.search, "Find commits", width, pal);
+                            // Search by message, author, changed text or file path (doc §Chercher).
+                            crate::ui_extra::search_mode(ui, tab, &field, &mut acts);
                         });
                     });
                 });
@@ -441,6 +447,10 @@ impl VegitApp {
                                 });
                             });
                         });
+                }
+                if tab.snap.bisect.is_some() {
+                    ui.add_space(g as f32);
+                    crate::ui_extra::bisect_banner(ui, tab, pal, &mut acts);
                 }
                 if tab.snap.lfs.used && !tab.snap.lfs.installed {
                     ui.add_space(g as f32);
@@ -582,6 +592,35 @@ impl VegitApp {
                         });
                     });
                     let url = self.home.clone_url.trim().to_string();
+                    // Clone options, closed by default (doc: branch, recent history, submodules).
+                    egui::CollapsingHeader::new(RichText::new("More options").color(pal.text2())).id_salt("clone_more").default_open(false).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Branch");
+                            match &self.home.heads {
+                                Some(Ok(heads)) if !heads.is_empty() => {
+                                    let shown = if self.home.clone_branch.is_empty() { "default".to_string() } else { self.home.clone_branch.clone() };
+                                    egui::ComboBox::from_id_salt("clone_branch").width(200.0).selected_text(shown).show_ui(ui, |ui| {
+                                        crate::util::menu_pad(ui);
+                                        ui.selectable_value(&mut self.home.clone_branch, String::new(), "default");
+                                        for h in heads {
+                                            ui.selectable_value(&mut self.home.clone_branch, h.clone(), h);
+                                        }
+                                    });
+                                }
+                                _ => {
+                                    ui.add(egui::TextEdit::singleline(&mut self.home.clone_branch).hint_text("default").desired_width(160.0));
+                                    if ui.add_enabled(!url.is_empty(), egui::Button::new("List branches")).on_hover_text("git ls-remote --heads").clicked() {
+                                        acts.push(Action::ListHeads(url.clone()));
+                                    }
+                                    if let Some(Err(e)) = &self.home.heads {
+                                        ui.label(RichText::new(crate::git::explain_remote_error(e)).size(11.5).color(pal.removed));
+                                    }
+                                }
+                            }
+                        });
+                        ui.checkbox(&mut self.home.clone_recent, "Only recent history (faster)").on_hover_text("--depth 1: the full history can be loaded later from the repository menu");
+                        ui.checkbox(&mut self.home.clone_submodules, "Include submodules").on_hover_text("--recurse-submodules");
+                    });
                     if ui.add_enabled(!url.is_empty() && !busy, accent_button("Clone", pal)).clicked() {
                         let name = url.trim_end_matches('/').trim_end_matches(".git").rsplit(['/', ':']).next().unwrap_or("repo").to_string();
                         let dest = PathBuf::from(self.home.clone_dest.trim()).join(name);

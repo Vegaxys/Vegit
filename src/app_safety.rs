@@ -158,10 +158,15 @@ impl VegitApp {
                         self.handle_one(ctx, Action::Select(super::Selection::Commit(s)));
                     }
                 }
+                // Exactly two: compare them (doc §Comparer).
+                self.compare_picked();
             }
             Action::ClearPicked => {
                 if let Some(t) = self.tab() {
                     t.picked_commits.clear();
+                    if t.compare.as_ref().is_some_and(|c| !c.branches) {
+                        t.compare = None;
+                    }
                 }
             }
             other => self.handle_big(ctx, other),

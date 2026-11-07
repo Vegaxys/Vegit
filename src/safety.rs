@@ -79,6 +79,8 @@ pub enum Step {
     Write(String, String),
     /// Delete a file of the working folder (relative path).
     Delete(String),
+    /// Delete a whole folder (git's own data of a removed submodule).
+    DeleteDir(std::path::PathBuf),
     /// Save these files before what follows changes them (undo restores them).
     Backup(Vec<String>),
 }
@@ -137,6 +139,8 @@ pub fn describe(args: &[String]) -> Option<(String, ResetMode)> {
             None | Some("push") => keep("stash"),
             Some("pop") => keep("pop stash"),
             Some("drop") => keep("delete stash"),
+            Some("clear") => keep("delete all stashes"),
+            Some("branch") => keep("stash to branch"),
             _ => None,
         },
         "restore" if has("--worktree") && !has("--staged") && !a.iter().any(|x| x.starts_with("--source")) => keep("discard"),
@@ -290,9 +294,12 @@ pub fn undo_steps(before: &RefState, after: &RefState, mode: ResetMode) -> Vec<S
     let (b, a) = (&before.stashes, &after.stashes);
     if a.len() == b.len() + 1 && a[1..] == b[..] {
         steps.push(git_step(&["stash", "pop"]));
-    } else if b.len() == a.len() + 1 {
-        let k = (0..b.len()).find(|&i| a.get(i) != Some(&b[i])).unwrap_or(b.len() - 1);
-        steps.push(git_step(&["stash", "store", "-m", &b[k].1, &b[k].0]));
+    } else if a.len() < b.len() {
+        // Entries that disappeared (a drop, a pop, or "Delete all"): stored back oldest first,
+        // so the newest ends on top again.
+        for (sha, msg) in b.iter().rev().filter(|e| !a.contains(e)) {
+            steps.push(git_step(&["stash", "store", "-m", msg, sha]));
+        }
     }
     steps
 }
@@ -336,6 +343,11 @@ pub fn run_steps(dir: &Path, steps: &[Step], backups: &mut Vec<Backup>, record: 
             }
             Step::Write(rel, text) => {
                 std::fs::write(dir.join(rel), text).map_err(|e| format!("{rel}: {e}"))?;
+            }
+            Step::DeleteDir(p) => {
+                if p.exists() {
+                    std::fs::remove_dir_all(p).map_err(|e| format!("{}: {e}", p.display()))?;
+                }
             }
             Step::Delete(rel) => {
                 let p = dir.join(rel);
