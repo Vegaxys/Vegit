@@ -33,8 +33,15 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
             branch_tree(ui, "local", &locals, filtering, pal, &mut |ui, leaf, i| local_item(ui, tab, i, leaf, pal, acts));
         });
 
-        // Remote branches, one section per remote, also in folders.
-        for remote in tab.snap.remotes.clone() {
+        // Remote branches, one section per remote, also in folders. The first header carries
+        // the "+" that adds a remote; right-click on a remote's name for its menu.
+        let remotes = tab.snap.remotes.clone();
+        if remotes.is_empty() {
+            section_with(ui, "remotes-none", Icon::Cloud, "Remotes  (0)", pal, |ui, _| add_remote_button(ui, pal, acts), |ui| {
+                ui.label(RichText::new("No remote yet. + adds one: the address of this repository on GitHub, GitLab or a server.").color(pal.muted).size(12.0));
+            });
+        }
+        for (k, remote) in remotes.iter().enumerate() {
             let prefix = format!("{remote}/");
             let items: Vec<(String, usize)> = (0..tab.snap.refs.len())
                 .filter(|&i| {
@@ -43,9 +50,18 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
                 })
                 .map(|i| (tab.snap.refs[i].name[prefix.len()..].to_string(), i))
                 .collect();
-            section(ui, &format!("remote-{remote}"), Icon::Cloud, &format!("{remote}  ({})", items.len()), pal, |ui| {
-                branch_tree(ui, &format!("remote-{remote}"), &items, filtering, pal, &mut |ui, leaf, i| remote_item(ui, tab, i, &remote, leaf, pal, acts));
+            let mut head_acts = Vec::new();
+            let header = |ui: &mut egui::Ui, title: &egui::Response| {
+                let title = title.clone().on_hover_text("Right-click for this remote's menu");
+                title.context_menu(|ui| crate::ui_quick::remote_menu(ui, tab, remote, pal, &mut head_acts));
+                if k == 0 {
+                    add_remote_button(ui, pal, &mut head_acts);
+                }
+            };
+            section_with(ui, &format!("remote-{remote}"), Icon::Cloud, &format!("{remote}  ({})", items.len()), pal, header, |ui| {
+                branch_tree(ui, &format!("remote-{remote}"), &items, filtering, pal, &mut |ui, leaf, i| remote_item(ui, tab, i, remote, leaf, pal, acts));
             });
+            acts.extend(head_acts);
         }
 
         // Pull requests (or merge requests) on the hosting service.
@@ -121,21 +137,52 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
             .filter(|&i| tab.snap.refs[i].kind == RefKind::Tag && keep(&tab.snap.refs[i].name))
             .collect();
         section(ui, "tags", Icon::Tag, &format!("Tags  ({})", tags.len()), pal, |ui| {
+            let default_remote = tab.default_remote();
             for i in tags.into_iter().rev() {
                 let r = &tab.snap.refs[i];
-                let resp = ui.add(egui::Button::selectable(false, RichText::new(format!("   {}", r.name)).color(pal.text2())).frame_when_inactive(false));
+                let local_only = tab.is_local_only_tag(&r.name);
+                let mut atoms = egui::Atoms::default();
+                atoms.push_right(RichText::new(format!("   {}", r.name)).color(pal.text2()));
+                if local_only {
+                    atoms.push_right(RichText::new("local").size(10.5).color(pal.warn));
+                }
+                let mut resp = ui.add(egui::Button::selectable(false, atoms).frame_when_inactive(false).truncate());
+                if local_only {
+                    let remote = default_remote.clone().unwrap_or_default();
+                    resp = resp.on_hover_text(format!("Only on this computer: {remote} doesn't have this tag yet. Right-click → Push to {remote}."));
+                }
                 if resp.clicked() {
                     acts.push(Action::SelectRef(r.target.clone()));
                 }
                 let name = r.name.clone();
+                let remotes = &tab.snap.remotes;
                 resp.context_menu(|ui| {
                     crate::util::menu_pad(ui);
+                    // "Push to origin" for the default remote; the others in a submenu.
+                    if let Some(d) = &default_remote {
+                        let push = |ui: &mut egui::Ui, remote: &str, acts: &mut Vec<Action>| {
+                            if ui.button(format!("Push to {remote}")).on_hover_text(format!("git push {remote} refs/tags/{name}")).clicked() {
+                                acts.push(Action::PushTags { remote: remote.to_string(), tags: vec![name.clone()] });
+                                ui.close();
+                            }
+                        };
+                        push(ui, d, acts);
+                        if remotes.len() > 1 {
+                            ui.menu_button("Push to another remote", |ui| {
+                                crate::util::menu_pad(ui);
+                                for rem in remotes.iter().filter(|r| *r != d) {
+                                    push(ui, rem, acts);
+                                }
+                            });
+                        }
+                    }
                     if ui.button("Copy name").clicked() {
                         acts.push(Action::Copy(name.clone()));
                         ui.close();
                     }
-                    if ui.button(RichText::new("Delete tag").color(pal.removed)).clicked() {
-                        acts.push(Action::Git { label: format!("Deleted tag {name}"), args: vec!["tag".into(), "-d".into(), name.clone()], background: false });
+                    ui.separator();
+                    if ui.button(RichText::new("Delete tag…").color(pal.removed)).clicked() {
+                        acts.push(Action::Dialog(Dialog::DeleteTag { tag: name.clone(), remote: default_remote.clone().filter(|_| !local_only), also_remote: false }));
                         ui.close();
                     }
                 });
@@ -256,9 +303,15 @@ fn local_item(ui: &mut egui::Ui, tab: &RepoTab, i: usize, leaf: &str, pal: &Pale
             atoms.push_right(RichText::new(count.to_string()).color(color));
         }
     }
-    let resp = ui
-        .add(egui::Button::selectable(false, atoms).frame_when_inactive(false).truncate())
-        .on_hover_text(format!("{}\nClick to show in the graph · double-click to switch to it · right-click for more", r.name));
+    if r.gone {
+        atoms.push_right(RichText::new("gone").size(10.5).color(pal.warn));
+    }
+    let hover = match (&r.upstream, r.gone) {
+        (Some(up), true) => format!("{}\n{up} was deleted on the server: right-click → Delete local branch too.", r.name),
+        (Some(up), false) => format!("{}  ·  follows {up}\nClick to show in the graph · double-click to switch to it · right-click for more", r.name),
+        (None, _) => format!("{}  ·  local only\nClick to show in the graph · double-click to switch to it · right-click for more", r.name),
+    };
+    let resp = ui.add(egui::Button::selectable(false, atoms).frame_when_inactive(false).truncate()).on_hover_text(hover);
     if resp.clicked() {
         acts.push(Action::SelectRef(r.target.clone()));
     }
@@ -267,22 +320,38 @@ fn local_item(ui: &mut egui::Ui, tab: &RepoTab, i: usize, leaf: &str, pal: &Pale
     }
     let name = r.name.clone();
     let current = tab.snap.head_branch.clone();
+    let upstream = r.upstream.clone();
+    let gone = r.gone;
     resp.context_menu(|ui| {
         crate::util::menu_pad(ui);
+        if gone && !is_head {
+            if ui.button(RichText::new("Delete local branch too").color(pal.removed)).on_hover_text("Its remote branch was deleted on the server").clicked() {
+                acts.push(Action::DeleteBranch(name.clone()));
+                ui.close();
+            }
+            ui.separator();
+        }
         if !is_head && ui.button(format!("Switch to {name}")).clicked() {
             acts.push(Action::CheckoutLocal(name.clone()));
             ui.close();
         }
         if let (false, Some(cur)) = (is_head, current.as_ref()) {
-            if ui.button(format!("Merge {name} into {cur}")).clicked() {
-                acts.push(Action::Git { label: format!("Merged {name}"), args: vec!["merge".into(), "--no-edit".into(), name.clone()], background: false });
-                ui.close();
-            }
-            if ui.button(format!("Rebase {cur} onto {name}")).clicked() {
-                acts.push(Action::Git { label: format!("Rebased onto {name}"), args: vec!["rebase".into(), name.clone()], background: false });
+            crate::ui_quick::merge_items(ui, &name, &name, cur, acts);
+        }
+        ui.separator();
+        if ui.button("Track a remote branch…").on_hover_text(format!("git branch --set-upstream-to=<remote branch> {name}")).clicked() {
+            let options = tab.track_options(&name);
+            let choice = upstream.as_ref().and_then(|u| options.iter().position(|o| o == u)).unwrap_or(0);
+            acts.push(Action::Dialog(Dialog::Track { local: name.clone(), options, choice }));
+            ui.close();
+        }
+        if let Some(up) = &upstream {
+            if ui.button("Stop tracking").on_hover_text(format!("git branch --unset-upstream {name}\nIt stays on the server; {name} becomes local only.")).clicked() {
+                acts.push(Action::Git { label: format!("{name} no longer tracks {up}"), args: crate::git::unset_upstream_args(&name), background: false });
                 ui.close();
             }
         }
+        ui.separator();
         if ui.button("Start a pull request…").clicked() {
             acts.push(Action::OpenPullRequestForm(Some(name.clone())));
             ui.close();
@@ -299,17 +368,26 @@ fn local_item(ui: &mut egui::Ui, tab: &RepoTab, i: usize, leaf: &str, pal: &Pale
             acts.push(Action::Copy(name.clone()));
             ui.close();
         }
-        if !is_head {
+        if !is_head && !gone {
             ui.separator();
-            if ui.button(RichText::new("Delete branch").color(pal.removed)).clicked() {
-                acts.push(Action::Dialog(Dialog::Confirm {
-                    title: format!("Delete {name}?"),
-                    body: "Git refuses if the branch has commits that aren't merged anywhere else.".into(),
-                    confirm: "Delete".into(),
-                    then: Box::new(Action::Git { label: format!("Deleted {name}"), args: vec!["branch".into(), "-d".into(), name.clone()], background: false }),
-                }));
+            if ui
+                .button(RichText::new("Delete branch").color(pal.removed))
+                .on_hover_text("Deleted at once (Undo in the toast); if it has commits no other branch has, they are listed first.")
+                .clicked()
+            {
+                acts.push(Action::DeleteBranch(name.clone()));
                 ui.close();
             }
+        }
+    });
+}
+
+/// The "+" of the remotes header: opens "Add remote".
+fn add_remote_button(ui: &mut egui::Ui, pal: &Palette, acts: &mut Vec<Action>) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let plus = egui::Button::new(RichText::new("+").size(15.0).strong().color(pal.text2())).frame_when_inactive(false).min_size(egui::vec2(22.0, 20.0));
+        if ui.add(plus).on_hover_text("Add a remote").clicked() {
+            acts.push(Action::OpenAddRemote);
         }
     });
 }
@@ -335,14 +413,8 @@ fn remote_item(ui: &mut egui::Ui, tab: &RepoTab, i: usize, remote: &str, leaf: &
             acts.push(Action::CheckoutRemote(full.clone()));
             ui.close();
         }
-        if ui.button(format!("Merge {full} into {current}")).clicked() {
-            acts.push(Action::Git { label: format!("Merged {full}"), args: vec!["merge".into(), "--no-edit".into(), full.clone()], background: false });
-            ui.close();
-        }
-        if ui.button(format!("Rebase {current} onto {full}")).clicked() {
-            acts.push(Action::Git { label: format!("Rebased onto {full}"), args: vec!["rebase".into(), full.clone()], background: false });
-            ui.close();
-        }
+        crate::ui_quick::merge_items(ui, &full, &full, &current, acts);
+        ui.separator();
         if ui.button("Copy name").clicked() {
             acts.push(Action::Copy(short.clone()));
             ui.close();
@@ -363,6 +435,12 @@ fn remote_item(ui: &mut egui::Ui, tab: &RepoTab, i: usize, remote: &str, leaf: &
 /// A foldable sidebar section: chevron, icon, title. Open by default; the state is kept
 /// under the same id as the former `CollapsingHeader`, so saved layouts still apply.
 fn section(ui: &mut egui::Ui, id: &str, icon: Icon, title: &str, pal: &Palette, body: impl FnOnce(&mut egui::Ui)) {
+    section_with(ui, id, icon, title, pal, |_, _| {}, body);
+}
+
+/// [`section`] with extras in the header row: `header` gets the title's response (for a
+/// right-click menu) and the rest of the row (for buttons).
+fn section_with(ui: &mut egui::Ui, id: &str, icon: Icon, title: &str, pal: &Palette, header: impl FnOnce(&mut egui::Ui, &egui::Response), body: impl FnOnce(&mut egui::Ui)) {
     let state_id = ui.make_persistent_id(id);
     let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), state_id, true);
     let header = ui.horizontal(|ui| {
@@ -372,6 +450,7 @@ fn section(ui: &mut egui::Ui, id: &str, icon: Icon, title: &str, pal: &Palette, 
         if label.clicked() {
             state.toggle(ui);
         }
+        header(ui, &label);
     });
     state.show_body_indented(&header.response, ui, |ui| {
         ui.spacing_mut().item_spacing.y = 1.0;

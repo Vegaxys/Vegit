@@ -25,6 +25,10 @@ use crate::graph::{self, GraphLayout};
 use crate::preview;
 use crate::theme::{self, Appearance, LaneMode, Palette, ThemeChoice};
 
+#[path = "app_quick.rs"]
+mod quick;
+pub use quick::{PushForm, RemoteCheck, RemoteForm};
+
 pub const SETTINGS_KEY: &str = "vegit_settings";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -54,8 +58,21 @@ pub struct Settings {
     pub show_avatars: bool,
     /// Widths of the graph columns: branch/tag, graph, message, author, date, id.
     pub columns: [f32; 6],
+    /// Which graph columns are shown (same order as `columns`).
+    pub columns_visible: [bool; 6],
+    /// Narrower lanes in the graph column.
+    pub compact_graph: bool,
     /// Working-changes lists grouped by kind of change instead of by name.
     pub sort_by_status: bool,
+    /// Halftone graphic behind the tiles ("Random" picks one at each launch). New field
+    /// names on purpose: older saved values of another type are simply ignored.
+    pub bg_graphic: crate::backdrop::Graphic,
+    /// How the halftone samples its sizes.
+    pub bg_gradient: crate::backdrop::Gradient,
+    /// How visible the pattern is, 0..1.
+    pub bg_strength: f32,
+    /// Size of one halftone cell, in points.
+    pub bg_cell: f32,
 }
 
 impl Default for Settings {
@@ -76,11 +93,22 @@ impl Default for Settings {
             pin_head: true,
             show_descriptions: true,
             show_avatars: true,
-            columns: [150.0, 100.0, 220.0, 130.0, 90.0, 70.0],
+            columns: DEFAULT_COLUMNS,
+            columns_visible: [true; 6],
+            compact_graph: false,
             sort_by_status: false,
+            bg_graphic: crate::backdrop::Graphic::Random,
+            bg_gradient: crate::backdrop::Gradient::Diagonal,
+            bg_strength: 0.5,
+            bg_cell: 16.0,
         }
     }
 }
+
+/// Default widths of the graph columns: branch/tag, graph, message, author, date, id.
+pub const DEFAULT_COLUMNS: [f32; 6] = [150.0, 100.0, 220.0, 130.0, 125.0, 70.0];
+/// The "compact" layout: narrower columns, author and id hidden.
+pub const COMPACT_COLUMNS: [f32; 6] = [120.0, 70.0, 220.0, 110.0, 125.0, 64.0];
 
 impl Settings {
     pub fn appearance(&self) -> Appearance {
@@ -217,6 +245,14 @@ pub struct RepoTab {
     pub author_filter: Option<String>,
     /// Horizontal scroll of the graph rows, so the header can follow it.
     pub graph_hscroll: f32,
+    /// Scroll position of the graph rows, for middle-click panning.
+    pub graph_offset: eframe::egui::Vec2,
+    /// A middle-button drag is moving the graph.
+    pub graph_panning: bool,
+    /// Tags each remote has, as last asked after a fetch or push; feeds the "local" badges.
+    pub remote_tags: HashMap<String, HashSet<String>>,
+    /// The "Who are you?" form of the commit panel: name and e-mail being typed.
+    pub identity_form: (String, String),
 }
 
 impl RepoTab {
@@ -256,6 +292,10 @@ impl RepoTab {
             wip_split: None,
             author_filter: None,
             graph_hscroll: 0.0,
+            graph_offset: eframe::egui::Vec2::ZERO,
+            graph_panning: false,
+            remote_tags: HashMap::new(),
+            identity_form: (String::new(), String::new()),
         }
     }
 
@@ -327,6 +367,16 @@ pub enum Dialog {
     Access(AccessForm),
     NewPullRequest(PrForm),
     Settings,
+    AddRemote(RemoteForm),
+    RenameRemote { old: String, name: String },
+    RemoteUrl { name: String, url: String },
+    Push(PushForm),
+    /// Delete a tag, and optionally the same tag on `remote`.
+    DeleteTag { tag: String, remote: Option<String>, also_remote: bool },
+    /// Pick the remote branch `local` follows; `options` are remote branch names.
+    Track { local: String, options: Vec<String>, choice: usize },
+    /// The branch has commits no other branch has: list them before deleting anyway.
+    Unmerged { branch: String, sha: String, commits: Vec<(String, String)> },
 }
 
 /// The "Create pull request" window: from a repository and branch into another.
@@ -457,6 +507,25 @@ pub enum Action {
     OpenPullRequestForm(Option<String>),
     CreatePullRequest(PrForm),
     OpenSubmodule(String),
+    // Remotes, tags on the server, upstream, forced delete, merge options, identity
+    // (handled in app_quick.rs).
+    OpenAddRemote,
+    /// Checks in the background that an address answers as a git repository.
+    CheckRemote(String),
+    AddRemote { name: String, url: String },
+    FetchRemote(String),
+    OpenPushDialog,
+    PushTo { remote: String, branch: String, remote_branch: String, force: bool, tags: Vec<String>, set_upstream: bool },
+    PushTags { remote: String, tags: Vec<String> },
+    CheckRemoteTags(String),
+    /// `git tag` with these arguments; the toast then offers to push the tag.
+    CreateTag { name: String, args: Vec<String> },
+    DeleteTag { tag: String, remote: Option<String> },
+    /// Deletes at once when nothing would be lost, otherwise lists what would be.
+    DeleteBranch(String),
+    ForceDeleteBranch { name: String, sha: String },
+    Merge { source: String, mode: git::MergeMode },
+    SetIdentity { global: bool, name: String, email: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -470,12 +539,23 @@ pub struct Toast {
     pub text: String,
     pub kind: ToastKind,
     pub until: f64,
+    /// A button in the toast (an Undo, "Push it to origin") and what it does.
+    pub action: Option<(String, Action)>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What an operation is, for what happens once it is done.
+#[derive(Clone, Debug)]
 enum OpKind {
     Plain,
     Commit,
+    /// On success the toast offers this follow-up.
+    Offer(String, Box<Action>),
+    /// `merge --squash`: the worker writes the commit message before merging...
+    Squash { source: String, target: String },
+    /// ...and hands it back as (summary, description) to prefill the commit panel.
+    Squashed(String, String),
+    /// Tags changed on this remote: ask it again which tags it has.
+    RemoteTags(String),
 }
 
 /// Work for the worker thread, processed strictly in order.
@@ -488,6 +568,8 @@ enum Task {
     Images { repo: PathBuf, source: DiffSource, file: FileChange, token: u64 },
     FileLog { repo: PathBuf, path: String },
     Blame { repo: PathBuf, path: String },
+    /// What deleting a branch would lose.
+    BranchCheck { repo: PathBuf, name: String },
 }
 
 /// Result of work done off the window thread.
@@ -503,6 +585,9 @@ enum JobDone {
     Prs { tab_path: PathBuf, result: Result<(RemoteRepo, Vec<PullRequest>), String> },
     PrCreated { tab_path: PathBuf, result: Result<String, String> },
     Poll { tab_path: PathBuf, status: Option<git::WorkStatus>, fingerprint: String },
+    RemoteChecked { url: String, result: Result<usize, String> },
+    RemoteTags { tab_path: PathBuf, remote: String, result: Result<HashSet<String>, String> },
+    BranchCheck { tab_path: PathBuf, name: String, result: Result<(String, Vec<(String, String)>), String> },
 }
 
 pub struct HomeForm {
@@ -520,6 +605,9 @@ pub struct ScreenshotJob {
 }
 
 pub struct VegitApp {
+    /// Where the active tab was drawn this frame, so the header tile below can open
+    /// its top border under it and the two read as one piece.
+    pub active_tab_rect: Option<eframe::egui::Rect>,
     pub tabs: Vec<RepoTab>,
     pub active: usize,
     pub show_home: bool,
@@ -537,6 +625,9 @@ pub struct VegitApp {
     pub actions: Vec<Action>,
     pub screenshot: Option<ScreenshotJob>,
     applied_theme: Option<Appearance>,
+    /// The pattern actually drawn: the setting, or this launch's random pick.
+    /// This launch's random graphic, gradient and noise seed, used while the setting is "Random".
+    pub backdrop_pick: (crate::backdrop::Graphic, crate::backdrop::Gradient, u64),
     next_token: u64,
 }
 
@@ -550,6 +641,7 @@ impl VegitApp {
         let (tx, rx) = mpsc::channel();
         let worker = spawn_worker(tx.clone(), cc.egui_ctx.clone());
         let mut app = Self {
+            active_tab_rect: None,
             tabs: Vec::new(),
             active: 0,
             show_home: false,
@@ -575,6 +667,7 @@ impl VegitApp {
                 done: Arc::new(AtomicBool::new(false)),
             }),
             applied_theme: None,
+            backdrop_pick: crate::backdrop::launch_pick(),
             next_token: 0,
         };
 
@@ -621,8 +714,61 @@ impl VegitApp {
                     app.actions.push(Action::Select(Selection::Commit(c)));
                 }
             }
+            if std::env::var_os("VEGIT_PREVIEW_HOME").is_some() {
+                app.show_home = true;
+                app.settings.recent = vec!["F:/Repos/osu".into(), "F:/UnityProjects/IncrementalTribute".into()];
+            }
+            if let Ok(name) = std::env::var("VEGIT_PATTERN") {
+                if let Some(p) = crate::backdrop::Graphic::KINDS.iter().find(|p| format!("{p:?}").eq_ignore_ascii_case(&name)) {
+                    app.settings.bg_graphic = *p;
+                }
+            }
+            if let Ok(name) = std::env::var("VEGIT_GRADIENT") {
+                if let Some(g) = crate::backdrop::Gradient::ALL.iter().find(|g| format!("{g:?}").eq_ignore_ascii_case(&name)) {
+                    app.settings.bg_gradient = *g;
+                }
+            }
+            if let Ok(w) = std::env::var("VEGIT_REFS_WIDTH") {
+                app.settings.columns[0] = w.parse().unwrap_or(150.0);
+            }
             if std::env::var_os("VEGIT_TREE").is_some() {
                 app.settings.tree_view = true;
+            }
+            // A merge stopped on a conflict, to check the banner and the "Resolved" rows.
+            if std::env::var_os("VEGIT_PREVIEW_CONFLICT").is_some() {
+                let snap = &mut app.tabs[0].snap;
+                snap.pending = Some(git::PendingOp::Merge);
+                snap.status.unstaged.insert(0, FileChange { path: "src/settings/store.rs".into(), old_path: None, state: FileState::Conflicted });
+            }
+            // The "quick wins" windows and states.
+            if let Ok(which) = std::env::var("VEGIT_PREVIEW_QUICK") {
+                let t = &mut app.tabs[0];
+                match which.as_str() {
+                    "remote" => {
+                        let existing = t.snap.remote_urls.clone();
+                        app.actions.push(Action::Dialog(Dialog::AddRemote(RemoteForm {
+                            url: "https://github.com/acme/sample-project.git".into(),
+                            name: git::suggest_remote_name(&existing, "https://github.com/acme/sample-project.git"),
+                            name_edited: false,
+                            checked_url: "https://github.com/acme/sample-project.git".into(),
+                            existing,
+                            check: RemoteCheck::Reachable(12),
+                            edited_at: 0.0,
+                        })));
+                    }
+                    "push" => app.actions.push(Action::OpenPushDialog),
+                    "unmerged" => {
+                        let commits = t.snap.commits.iter().take(3).map(|c| (c.sha.clone(), c.summary.clone())).collect();
+                        app.actions.push(Action::Dialog(Dialog::Unmerged { branch: "feature/search".into(), sha: "0".repeat(40), commits }));
+                    }
+                    "identity" => t.snap.identity = git::Identity::default(),
+                    "rebase" => t.snap.pending = Some(git::PendingOp::Rebase),
+                    "toast" => {
+                        let undo = Action::Git { label: String::new(), args: Vec::new(), background: false };
+                        app.toasts.push(Toast { text: "Deleted feature/old-login".into(), kind: ToastKind::Success, until: 1e9, action: Some(("Undo".into(), undo)) });
+                    }
+                    _ => {}
+                }
             }
             if std::env::var_os("VEGIT_PREVIEW_ACCESS").is_some() {
                 app.actions.push(Action::Dialog(Dialog::Access(AccessForm { host: "github.com".into(), ..Default::default() })));
@@ -656,6 +802,24 @@ impl VegitApp {
 
     /// Re-applies fonts and colours when an appearance setting changed, and keeps the
     /// global switches (graph pinning, avatars) in step with the settings.
+    /// The background as it should be drawn now, with "Random" resolved.
+    pub fn backdrop_look(&self) -> crate::backdrop::Look {
+        use crate::backdrop::{Graphic, Look};
+        let s = &self.settings;
+        let (graphic, gradient) = if s.bg_graphic == Graphic::Random { (self.backdrop_pick.0, self.backdrop_pick.1) } else { (s.bg_graphic, s.bg_gradient) };
+        Look { graphic, gradient, strength: s.bg_strength, cell: s.bg_cell, seed: self.backdrop_pick.2 }
+    }
+
+    pub fn shuffle_backdrop(&mut self) {
+        let old = self.backdrop_pick;
+        for _ in 0..8 {
+            self.backdrop_pick = crate::backdrop::launch_pick();
+            if (self.backdrop_pick.0, self.backdrop_pick.1) != (old.0, old.1) {
+                break;
+            }
+        }
+    }
+
     pub fn ensure_theme(&mut self, ctx: &egui::Context) {
         let a = self.settings.appearance();
         if self.applied_theme.as_ref() != Some(&a) {
@@ -673,7 +837,7 @@ impl VegitApp {
 
     pub fn toast(&mut self, ctx: &egui::Context, text: impl Into<String>, kind: ToastKind) {
         let secs = if kind == ToastKind::Error { 10.0 } else { 4.0 };
-        self.toasts.push(Toast { text: text.into(), kind, until: ctx.input(|i| i.time) + secs });
+        self.toasts.push(Toast { text: text.into(), kind, until: ctx.input(|i| i.time) + secs, action: None });
         if self.toasts.len() > 4 {
             self.toasts.remove(0);
         }
@@ -702,6 +866,8 @@ impl VegitApp {
             tab.set_snapshot(snap, layout);
             tab.prs = demo::pull_requests();
             tab.selection = Selection::Wip;
+            // One tag not pushed yet, so the "local" badge shows in the sample.
+            tab.remote_tags.insert("origin".into(), ["v1.3.0", "v1.4.0"].iter().map(|s| s.to_string()).collect());
             self.tabs.push(tab);
             self.active = self.tabs.len() - 1;
         }
@@ -801,9 +967,13 @@ impl VegitApp {
                     match result {
                         Ok(_) => {
                             if let Some(t) = ok_text {
-                                self.toast(ctx, t, ToastKind::Success);
+                                match &kind {
+                                    OpKind::Offer(button, then) => self.toast_offer(ctx, t, ToastKind::Success, button.clone(), (**then).clone()),
+                                    _ => self.toast(ctx, t, ToastKind::Success),
+                                }
                             }
-                            if kind == OpKind::Commit {
+                            self.after_op(ctx, &tab_path, &kind);
+                            if matches!(kind, OpKind::Commit) {
                                 if let Some(t) = self.tab_by_path(&tab_path) {
                                     t.summary.clear();
                                     t.description.clear();
@@ -813,7 +983,10 @@ impl VegitApp {
                             }
                         }
                         Err(e) => {
-                            let mut text = format!("{label} failed: {e}");
+                            let mut text = match quick::explain_failure(&e) {
+                                Some(plain) => plain,
+                                None => format!("{label} failed: {e}"),
+                            };
                             if access::looks_like_auth_error(&e) {
                                 text.push_str("\n\nPrivate repository? Open Access (key button, top right) to sign in.");
                             }
@@ -823,6 +996,11 @@ impl VegitApp {
                     if !from_worker && self.tabs.iter().any(|t| t.path.as_ref() == Some(&tab_path)) {
                         if label == "Fetch" || label == "Push" {
                             self.spawn_prs(ctx, tab_path.clone(), false);
+                            // Which tags the server has, for the "local" badges (doc: after each fetch).
+                            let remote = self.tab_by_path(&tab_path).and_then(|t| t.default_remote());
+                            if let Some(r) = remote {
+                                self.spawn_remote_tags(ctx, tab_path.clone(), r);
+                            }
                         }
                         self.send(Task::Reload { repo: tab_path });
                     }
@@ -935,6 +1113,20 @@ impl VegitApp {
                             }
                             self.toast(ctx, text, ToastKind::Error);
                         }
+                    }
+                }
+                JobDone::RemoteChecked { url, result } => self.on_remote_checked(url, result),
+                JobDone::RemoteTags { tab_path, remote, result } => {
+                    // A failure (offline, no access) just leaves the badges off.
+                    if let (Some(t), Ok(set)) = (self.tab_by_path(&tab_path), result) {
+                        t.remote_tags.insert(remote, set);
+                    }
+                }
+                JobDone::BranchCheck { tab_path, name, result } => {
+                    self.pending = self.pending.saturating_sub(1);
+                    let active = self.tabs.get(self.active).and_then(|t| t.path.clone()) == Some(tab_path);
+                    if active {
+                        self.on_branch_checked(ctx, name, result);
                     }
                 }
                 JobDone::Poll { tab_path, status, fingerprint } => {
@@ -1510,6 +1702,7 @@ impl VegitApp {
                 Ok(_) => self.toast(ctx, "Sign-ins will now be remembered by Git Credential Manager.", ToastKind::Success),
                 Err(e) => self.toast(ctx, e.0, ToastKind::Error),
             },
+            other => self.handle_quick(ctx, other),
         }
     }
 
@@ -1642,28 +1835,6 @@ impl VegitApp {
         self.queue_git(ctx, Some(label.into()), args, None, OpKind::Commit);
     }
 
-    fn push(&mut self, ctx: &egui::Context, force: bool) {
-        let Some(tab) = self.tab() else { return };
-        let Some(branch) = tab.snap.head_branch.clone() else {
-            self.toast(ctx, "Switch to a branch before pushing (HEAD is detached).", ToastKind::Info);
-            return;
-        };
-        let has_upstream = tab.snap.current_ref().is_some_and(|r| r.upstream.is_some());
-        let remote = tab.snap.remotes.first().cloned();
-        let mut args = vec!["push".to_string()];
-        if force {
-            args.push("--force-with-lease".into());
-        }
-        if !has_upstream {
-            let Some(remote) = remote else {
-                self.toast(ctx, "This repository has no remote to push to.", ToastKind::Info);
-                return;
-            };
-            args.extend(["-u".into(), remote, branch]);
-        }
-        self.git_background(ctx, "Push".into(), args);
-    }
-
     pub fn save_settings(&mut self, storage: &mut dyn eframe::Storage) {
         self.sync_open_tabs();
         eframe::set_value(storage, SETTINGS_KEY, &self.settings);
@@ -1690,6 +1861,14 @@ fn spawn_worker(out: Sender<JobDone>, ctx: egui::Context) -> Sender<Task> {
 fn run_task(task: Task) -> JobDone {
     match task {
         Task::Run { repo, label, ok_text, args, input, kind } => {
+            // The squash message lists the commits being combined: read them before merging.
+            let kind = match kind {
+                OpKind::Squash { source, target } => {
+                    let (summary, body) = git::squash_message(&repo, &source, &target);
+                    OpKind::Squashed(summary, body)
+                }
+                k => k,
+            };
             let refs: Vec<&str> = args.iter().map(String::as_str).collect();
             let result = match input {
                 Some(i) => git::run_with_input(&repo, &refs, &i),
@@ -1728,6 +1907,10 @@ fn run_task(task: Task) -> JobDone {
         Task::Blame { repo, path } => {
             let result = git::blame(&repo, &path).map_err(|e| e.0);
             JobDone::Blame { tab_path: repo, path, result }
+        }
+        Task::BranchCheck { repo, name } => {
+            let result = quick::branch_check(&repo, &name);
+            JobDone::BranchCheck { tab_path: repo, name, result }
         }
         Task::Detail { repo, commit } => {
             let detail = CommitDetail {

@@ -8,6 +8,7 @@
 mod access;
 mod app;
 mod avatars;
+mod backdrop;
 mod demo;
 mod diff;
 mod filelist;
@@ -22,6 +23,7 @@ mod theme;
 mod ui;
 mod ui_detail;
 mod ui_graph;
+mod ui_quick;
 mod ui_side;
 mod util;
 

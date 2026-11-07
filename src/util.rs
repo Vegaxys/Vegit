@@ -45,6 +45,11 @@ pub fn rel_time(t: i64) -> String {
     }
 }
 
+/// Commit date in the history table: 07-11-2026 14:32 (local time).
+pub fn short_date_time(t: i64) -> String {
+    Local.timestamp_opt(t, 0).single().map(|dt| dt.format("%d-%m-%Y %H:%M").to_string()).unwrap_or_default()
+}
+
 pub fn abs_time(t: i64) -> String {
     Local
         .timestamp_opt(t, 0)

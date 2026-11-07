@@ -292,6 +292,18 @@ pub fn commit_url(repo: &RemoteRepo, sha: &str) -> String {
     }
 }
 
+/// Home page of the repository on the hosting service.
+pub fn repo_url(repo: &RemoteRepo) -> String {
+    match repo.forge {
+        Forge::GitHub | Forge::GitLab => format!("https://{}/{}", repo.host, repo.path),
+        Forge::Bitbucket => format!("https://bitbucket.org/{}", repo.path),
+        Forge::Azure => {
+            let (op, name) = repo.path.rsplit_once('/').unwrap_or((&repo.path, ""));
+            format!("https://dev.azure.com/{op}/_git/{name}")
+        }
+    }
+}
+
 /// Web page of a branch on the hosting service.
 pub fn branch_url(repo: &RemoteRepo, branch: &str) -> String {
     match repo.forge {

@@ -4,33 +4,73 @@ A fast, friendly desktop Git client written in Rust with [egui](https://github.c
 No AI features, no account, no subscription: it drives your own `git` install, so credentials,
 hooks, config and SSH keys behave exactly as they do in a terminal.
 
+<p align="center">
+  <a href="docs/vegit-presentation.mp4"><img src="docs/vegit-presentation.jpg" width="820"
+    alt="Vegit in 30 seconds: commit graph, themes and backgrounds, tree or list view, staging, pull requests and merge conflicts"></a>
+  <br>
+  <sub><a href="docs/vegit-presentation.mp4">Watch the 30-second tour</a> (MP4 with sound): the commit graph, themes and
+  backgrounds, tree or list view, staging and committing, pull requests and merge conflicts.</sub>
+</p>
+
 ![Commit graph, branch sidebar and staging panel](shots/vegit.png)
 
 ## Features
 
 - **Commit graph**: branches, tags, remotes, merges and stashes laid out in stable lanes, with commit search.
-  Columns can be resized, the current branch is pinned to the left, and clicking "Author" filters commits
-  by author. Loads the last 3,000 commits so refreshes stay quick.
-- **Right-click menu** on any commit: push, pull, merge or rebase into the local branch, start a pull request,
-  rename or delete a branch, and copy the SHA, commit link, branch link or branch name.
-  Double-click a branch label to check it out.
-- **Staging**: stage, unstage or discard files one by one, in bulk or by folder (path or tree view),
-  and stage or unstage single hunks.
-- **Diffs**: unified or split view, virtualized so huge diffs (Unity scenes, big asset imports) stay smooth.
+  Columns can be resized, shown or hidden from the gear at the end of the header (with a compact layout and
+  a reset), the current branch is pinned to the left, and clicking "Author" filters commits by author.
+  Dates read `dd-MM-yyyy HH:mm`. A branch label too long for its column is cut with "…", and labels that
+  do not fit fold into a "+N" badge whose list opens on hover. Hold the middle mouse button and drag to pan
+  the history. Loads the last 3,000 commits so refreshes stay quick.
+- **Right-click menu** on any commit: push, pull, bring a branch into the current one or replay the current
+  one on top of it, start a pull request, rename or delete a branch, and copy the SHA, commit link, branch
+  link or branch name. Double-click a branch label to check it out.
+- **Merge options**, in the branch menus: « Bring feature into main » (merge), « … as one commit » (squash:
+  the changes are staged and the commit message is prefilled with the list of combined commits),
+  « Replay main on top of feature » (rebase), and under « More options » « Always create a merge commit »
+  (`--no-ff`) and « Only if no merge commit is needed » (`--ff-only`). The git command is in each tooltip.
+- **Staging**: stage, unstage or discard files one by one, in bulk or by folder, and stage or unstage
+  single hunks. File lists switch between full paths and a folder tree ("Path" / "Tree"), sorted by name
+  or by kind of change.
+- **Diffs**: hunk, inline or split view, virtualized so huge diffs (Unity scenes, big asset imports) stay smooth.
   Image changes (PNG, JPEG, GIF, WebP, BMP, ICO, TGA, SVG) can be rendered side by side.
 - **Commit**: summary and description, amend the previous commit, undo / redo the last commit.
 - **Branches and remotes**: create, check out (local or remote), fetch, pull, push (with force), stash and pop.
+- **Remotes**: the "+" of the remotes header opens « Add remote »: paste an address, Vegit checks it answers
+  (`ls-remote`, errors explained in plain words) and proposes a name (`origin`, or `upstream` for the original
+  of a fork). Right-click a remote's name to fetch it alone, rename it, change or copy its URL, open it on
+  GitHub/GitLab/…, or remove it (nothing is deleted on the server).
+- **Push…** (right-click Push): choose the remote and the branch name on the server, and also push the new
+  tags on the pushed commits (one by one, lightweight tags included). The toolbar Push stays one click and
+  only asks where to push for a first push when there are several remotes.
+- **Tags on the server**: after each fetch or push Vegit asks the server which tags it has; the others get a
+  « local » badge. Right-click a tag to push it; creating a tag offers « Push it to origin » in the toast;
+  deleting a tag can also delete it on the server.
+- **Upstream**: right-click a local branch to « Track a remote branch… » or « Stop tracking ». A branch whose
+  remote branch was deleted shows « gone » and offers « Delete local branch too ».
+- **Deleting a branch** happens at once with an Undo in the toast. If the branch has commits that no other
+  branch has, they are listed first and « Delete anyway » is needed.
+- **Identity**: when git doesn't know your name or e-mail, the commit panel asks « Who are you? » (for all
+  projects or only this one). Settings → Identity shows both levels and which one applies.
 - **File history and blame** for any file.
-- **Merge conflicts**: resolve a conflicted file with "ours" or "theirs".
+- **Merge conflicts**: while a merge, rebase, cherry-pick or revert is in progress, a banner counts the
+  conflicted files and offers Continue (once none is left) and Abort, plus « Skip this commit » during a
+  rebase, cherry-pick or revert. Right-click a conflicted file to keep
+  your version ("ours"), keep theirs, or mark it as resolved.
 - **Pull requests** on GitHub, GitLab (including self-hosted), Bitbucket Cloud and Azure DevOps:
   list, check out and create them (drafts too).
 - **Private repositories**: sign in with a token saved through git's credential helper
   (Git Credential Manager on Windows), or generate an SSH key. The app never stores secrets itself.
 - **Tabs** for several repositories, clone / init / open, submodules, "open in terminal / file explorer".
+  The "+" tab opens the welcome page: open, clone or create a repository, set up access to private
+  repositories, try the sample, or reopen a recent one.
 - **Sidebar**: branches grouped into folders (`feature/…`), with merge and rebase actions.
 - **Appearance settings**: theme presets (Midnight, Dracula, Monokai, Nord, Dusk, Paper and Solarized light),
   interface color, UI and code fonts (including a custom font file), text size, and branch colors
-  (theme, gradient, rainbow, random or a single color).
+  (theme, gradient, rainbow, random, a single color or the interface color).
+  A halftone background sits behind the panels: dots, circles, squares, diamonds, lines, crosses, plus signs
+  or triangles, shaded by a horizontal, vertical, diagonal or radial gradient or by noise, with adjustable
+  strength and cell size. It can be turned off, or picked at random at each launch (the default).
 - **Author pictures** from GitHub (for `users.noreply.github.com` addresses) or Gravatar, with initials as
   a fallback. This sends a hash of each author e-mail to those services, so it can be turned off in the settings.
 - **Non-blocking UI**: git runs on a worker thread and network operations on their own threads,
@@ -68,6 +108,27 @@ Save a screenshot of the sample project and exit (handy for checking the UI in C
 cargo run --release -- --screenshot out.png
 ```
 
+In screenshot mode, environment variables open other screens of the sample project:
+
+| Variable | Shows |
+| --- | --- |
+| `VEGIT_THEME=Dracula` | A theme preset (`Midnight`, `Dracula`, `Monokai`, `Nord`, `Dusk`, `Paper`, `SolarizedLight`) |
+| `VEGIT_PATTERN=Ring`, `VEGIT_GRADIENT=Radial` | A background pattern and its gradient (names as in `src/backdrop.rs`) |
+| `VEGIT_PREVIEW_HOME=1` | The welcome page |
+| `VEGIT_TREE=1` | File lists as a folder tree |
+| `VEGIT_PREVIEW_DIFF=panel.rs`, `VEGIT_DIFF_MODE=split` | The diff of an unstaged file, in `hunk`, `inline` or `split` mode |
+| `VEGIT_PREVIEW_COMMIT=1`, `VEGIT_PREVIEW_HISTORY=1` | A commit's details, a file's history |
+| `VEGIT_PREVIEW_PR=1` | The Create Pull Request dialog |
+| `VEGIT_PREVIEW_CONFLICT=1` | A merge stopped on a conflicted file |
+| `VEGIT_PREVIEW_SETTINGS=1`, `VEGIT_PREVIEW_ACCESS=1` | The settings or the access dialog |
+| `VEGIT_PREVIEW_QUICK=remote` | `remote`, `push`, `unmerged`: Add remote, Push…, delete an unmerged branch; `identity`: « Who are you? »; `rebase`: the banner with « Skip this commit »; `toast`: a toast with Undo |
+
+For example (in a POSIX shell):
+
+```bash
+VEGIT_PREVIEW_HOME=1 VEGIT_THEME=Nord VEGIT_PATTERN=Line VEGIT_GRADIENT=Vertical cargo run --release -- --screenshot home.png
+```
+
 Keyboard shortcuts: `F5` refreshes, `Ctrl+Enter` commits, `Esc` closes the open diff or dialog.
 
 ## Tests
@@ -77,7 +138,9 @@ cargo test
 ```
 
 The tests run the git layer against throwaway repositories in the temp folder (log, refs and status
-parsing, hunk staging, graph layout). One extra test lists the open pull requests of a public GitHub
+parsing, hunk staging, graph layout) and against a local bare repository standing in for the server
+(remotes, pushing and deleting tags, upstream and "gone" branches, forced delete and its restore, skipping
+during a rebase, identity at the project level, merge options). One extra test lists the open pull requests of a public GitHub
 repository; it needs network access, so it is ignored by default. Run it with:
 
 ```bash
@@ -97,8 +160,10 @@ cargo test -- --ignored
 | `src/forge.rs` | Pull requests on GitHub, GitLab, Bitbucket and Azure DevOps |
 | `src/access.rs` | Credentials and SSH keys for private repositories |
 | `src/theme.rs` | Color palettes and fonts |
+| `src/backdrop.rs` | Halftone background patterns and gradients |
 | `src/ui*.rs` | Window, sidebar, graph and detail panels |
 | `src/demo.rs` | Built-in sample repository |
 | `src/icons.rs` | Draws the SVG icons, tinted with the theme colour |
 | `assets/icons/`, `assets/brand/` | Icons, logo and app icon, exported as SVG from the Figma icon sheet |
 | `build.rs` | Turns the app icon into the Windows `.exe` icon |
+| `docs/` | The presentation video and its poster |

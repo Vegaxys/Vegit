@@ -43,6 +43,8 @@ pub struct RefInfo {
     /// Commits ahead/behind upstream for local branches.
     pub ahead: u32,
     pub behind: u32,
+    /// The upstream branch was deleted on the server (seen after a fetch with prune).
+    pub gone: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -147,9 +149,17 @@ pub struct Snapshot {
     pub submodules: Vec<String>,
     /// (remote name, fetch URL), for links to the hosting service.
     pub remote_urls: Vec<(String, String)>,
+    /// Who commits here (user.name / user.email, global and local).
+    pub identity: Identity,
 }
 
 impl Snapshot {
+    /// The summary of a loaded commit (used by the tests).
+    #[cfg(test)]
+    pub fn commit_summary(&self, sha: &str) -> Option<&str> {
+        self.commits.iter().find(|c| c.sha == sha).map(|c| c.summary.as_str())
+    }
+
     /// Refs grouped by the commit they point at, for the labels in the graph.
     pub fn refs_by_sha(&self) -> HashMap<String, Vec<usize>> {
         let mut map: HashMap<String, Vec<usize>> = HashMap::new();
@@ -326,6 +336,7 @@ pub fn load_snapshot(dir: &Path) -> GitResult<Snapshot> {
             .collect();
     }
 
+    snap.identity = identity(dir);
     snap.pending = if git_dir.join("MERGE_HEAD").exists() {
         Some(PendingOp::Merge)
     } else if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
@@ -505,6 +516,7 @@ fn load_refs(dir: &Path) -> GitResult<Vec<RefInfo>> {
             continue;
         };
         let (ahead, behind) = parse_track(f[4]);
+        let gone = f[4].trim() == "gone";
         refs.push(RefInfo {
             name: name.to_string(),
             kind,
@@ -512,6 +524,7 @@ fn load_refs(dir: &Path) -> GitResult<Vec<RefInfo>> {
             upstream: Some(f[3].to_string()).filter(|s| !s.is_empty()),
             ahead,
             behind,
+            gone,
         });
     }
     Ok(refs)
@@ -685,4 +698,219 @@ pub fn file_diff_ctx(dir: &Path, source: &DiffSource, file: &FileChange, whole_f
 /// Short sha for display.
 pub fn short(sha: &str) -> &str {
     &sha[..sha.len().min(7)]
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phase 1 "quick wins": remotes, remote tags, upstream, forced branch delete, skip,
+// identity and merge options. Builders return argument lists so the UI can queue them on
+// the worker like every other command; small queries run git directly.
+// ---------------------------------------------------------------------------------------------
+
+/// `git remote add <name> <url>`.
+pub fn remote_add_args(name: &str, url: &str) -> Vec<String> {
+    vec!["remote".into(), "add".into(), name.into(), url.into()]
+}
+
+pub fn remote_rename_args(old: &str, new: &str) -> Vec<String> {
+    vec!["remote".into(), "rename".into(), old.into(), new.into()]
+}
+
+pub fn remote_set_url_args(name: &str, url: &str) -> Vec<String> {
+    vec!["remote".into(), "set-url".into(), name.into(), url.into()]
+}
+
+pub fn remote_remove_args(name: &str) -> Vec<String> {
+    vec!["remote".into(), "remove".into(), name.into()]
+}
+
+/// Checks that `url` is a reachable repository (the same `ls-remote` the clone check uses).
+/// Returns how many branches it has, or the error put in plain words.
+pub fn remote_check(dir: &Path, url: &str) -> Result<usize, String> {
+    run(dir, &["ls-remote", "--heads", url]).map(|out| out.lines().filter(|l| !l.trim().is_empty()).count()).map_err(|e| explain_remote_error(&e.0))
+}
+
+/// Turns git's remote errors into a sentence with what to do next.
+pub fn explain_remote_error(e: &str) -> String {
+    let l = e.to_lowercase();
+    if crate::access::looks_like_auth_error(e) || l.contains("could not read from remote repository") {
+        "Git could not get in: the address is wrong, or this repository is private and you need to sign in (Access window).".into()
+    } else if l.contains("does not appear to be a git repository") || l.contains("not found") || l.contains("no such file") {
+        "Nothing answers as a git repository at this address. Check the URL.".into()
+    } else if l.contains("could not resolve host") || l.contains("unable to access") || l.contains("timed out") {
+        "Could not reach the server. Check the address and your connection.".into()
+    } else {
+        e.trim().to_string()
+    }
+}
+
+/// The name to propose for a new remote: `origin` when there is none; `upstream` when the
+/// URL is the same repository under another owner (a fork's original); otherwise the
+/// owner's name. Never one that is already taken.
+pub fn suggest_remote_name(existing: &[(String, String)], url: &str) -> String {
+    let taken = |n: &str| existing.iter().any(|(e, _)| e == n);
+    if existing.is_empty() {
+        return "origin".into();
+    }
+    let new = crate::forge::detect("new", url);
+    let base = existing.iter().find(|(n, _)| n == "origin").or(existing.first()).and_then(|(n, u)| crate::forge::detect(n, u));
+    let mut candidate = match (&new, &base) {
+        (Some(n), Some(b)) => {
+            let (n_owner, n_repo) = n.path.rsplit_once('/').unwrap_or(("", &n.path));
+            let (b_owner, b_repo) = b.path.rsplit_once('/').unwrap_or(("", &b.path));
+            if n_repo.eq_ignore_ascii_case(b_repo) && !n_owner.eq_ignore_ascii_case(b_owner) && !taken("upstream") {
+                "upstream".to_string()
+            } else {
+                n_owner.rsplit('/').next().unwrap_or("remote").to_lowercase()
+            }
+        }
+        (Some(n), None) => n.path.split('/').next().unwrap_or("remote").to_lowercase(),
+        _ => "remote".into(),
+    };
+    if candidate.is_empty() {
+        candidate = "remote".into();
+    }
+    if !taken(&candidate) {
+        return candidate;
+    }
+    (2..).map(|k| format!("{candidate}{k}")).find(|n| !taken(n)).unwrap_or(candidate)
+}
+
+/// Tag names that exist on `remote` (one `ls-remote`, nothing downloaded).
+pub fn remote_tags(dir: &Path, remote: &str) -> GitResult<std::collections::HashSet<String>> {
+    let out = run(dir, &["ls-remote", "--tags", "--refs", remote])?;
+    Ok(out.lines().filter_map(|l| l.split_whitespace().nth(1)?.strip_prefix("refs/tags/").map(str::to_string)).collect())
+}
+
+/// Pushes tags one by one with explicit refspecs: unlike `--follow-tags` this also pushes
+/// lightweight tags.
+pub fn push_tags_args(remote: &str, tags: &[String]) -> Vec<String> {
+    let mut args = vec!["push".to_string(), remote.to_string()];
+    args.extend(tags.iter().map(|t| format!("refs/tags/{t}")));
+    args
+}
+
+pub fn delete_remote_tag_args(remote: &str, tag: &str) -> Vec<String> {
+    vec!["push".into(), remote.into(), "--delete".into(), format!("refs/tags/{tag}")]
+}
+
+/// Tags reachable from `rev` (what pushing `rev` makes "pushed" on the server).
+pub fn tags_reachable(dir: &Path, rev: &str) -> GitResult<Vec<String>> {
+    Ok(run(dir, &["tag", "--merged", rev])?.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect())
+}
+
+/// `git branch --set-upstream-to=<remote_branch> <local>`.
+pub fn set_upstream_args(local: &str, remote_branch: &str) -> Vec<String> {
+    vec!["branch".into(), format!("--set-upstream-to={remote_branch}"), local.into()]
+}
+
+pub fn unset_upstream_args(local: &str) -> Vec<String> {
+    vec!["branch".into(), "--unset-upstream".into(), local.into()]
+}
+
+/// Commits of `branch` that no other branch (local or remote) contains: what deleting it
+/// would lose. Newest first, as (sha, summary).
+pub fn unique_commits(dir: &Path, branch: &str) -> GitResult<Vec<(String, String)>> {
+    let head = format!("refs/heads/{branch}");
+    let exclude = format!("--exclude={branch}");
+    let out = run(dir, &["log", "--format=%H%x1f%s", &head, "--not", &exclude, "--branches", "--remotes"])?;
+    Ok(out.lines().filter_map(|l| l.split_once('\x1f').map(|(a, b)| (a.to_string(), b.to_string()))).collect())
+}
+
+/// The commit a branch points at.
+pub fn branch_sha(dir: &Path, branch: &str) -> GitResult<String> {
+    Ok(run(dir, &["rev-parse", "--verify", &format!("refs/heads/{branch}^{{commit}}")])?.trim().to_string())
+}
+
+impl PendingOp {
+    /// Operations that can drop the commit they stopped on (`--skip`).
+    pub fn can_skip(self) -> bool {
+        matches!(self, Self::Rebase | Self::CherryPick | Self::Revert)
+    }
+}
+
+/// Who commits: `user.name` / `user.email` for all projects (global) and for this one
+/// (local). The local values win when set.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Identity {
+    pub global_name: Option<String>,
+    pub global_email: Option<String>,
+    pub local_name: Option<String>,
+    pub local_email: Option<String>,
+}
+
+impl Identity {
+    pub fn name(&self) -> Option<&str> {
+        self.local_name.as_deref().or(self.global_name.as_deref())
+    }
+
+    pub fn email(&self) -> Option<&str> {
+        self.local_email.as_deref().or(self.global_email.as_deref())
+    }
+
+    /// Both set somewhere, so git can commit.
+    pub fn is_complete(&self) -> bool {
+        self.name().is_some() && self.email().is_some()
+    }
+
+    /// Which level the name in use comes from.
+    pub fn source(&self) -> &'static str {
+        match (self.local_name.is_some() || self.local_email.is_some(), self.global_name.is_some() || self.global_email.is_some()) {
+            (true, _) => "this project",
+            (false, true) => "all projects",
+            _ => "nowhere yet",
+        }
+    }
+}
+
+pub fn identity(dir: &Path) -> Identity {
+    let get = |scope: &str, key: &str| {
+        run(dir, &["config", scope, "--get", key]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    };
+    Identity {
+        global_name: get("--global", "user.name"),
+        global_email: get("--global", "user.email"),
+        local_name: get("--local", "user.name"),
+        local_email: get("--local", "user.email"),
+    }
+}
+
+/// `git config [--global|--local] <key> <value>`; an empty value removes the key.
+pub fn set_identity_args(global: bool, key: &str, value: &str) -> Vec<String> {
+    let scope = if global { "--global" } else { "--local" };
+    if value.trim().is_empty() {
+        vec!["config".into(), scope.into(), "--unset".into(), key.into()]
+    } else {
+        vec!["config".into(), scope.into(), key.into(), value.trim().into()]
+    }
+}
+
+/// How a branch is brought into the current one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeMode {
+    /// Fast-forward when possible, a merge commit otherwise (git's default).
+    Normal,
+    /// All its changes staged as one new commit to write (`--squash`).
+    Squash,
+    /// Always a merge commit (`--no-ff`).
+    NoFastForward,
+    /// Only when no merge commit is needed (`--ff-only`).
+    FastForwardOnly,
+}
+
+pub fn merge_args(mode: MergeMode, source: &str) -> Vec<String> {
+    let mut args = vec!["merge".to_string()];
+    match mode {
+        MergeMode::Normal => args.push("--no-edit".into()),
+        MergeMode::Squash => args.push("--squash".into()),
+        MergeMode::NoFastForward => args.extend(["--no-ff".into(), "--no-edit".into()]),
+        MergeMode::FastForwardOnly => args.push("--ff-only".into()),
+    }
+    args.push(source.into());
+    args
+}
+
+/// Commit message for a squash: a summary, and the list of the commits it combines.
+pub fn squash_message(dir: &Path, source: &str, target: &str) -> (String, String) {
+    let list = run(dir, &["log", "--reverse", "--format=- %s", &format!("HEAD..{source}")]).unwrap_or_default();
+    (format!("Bring {source} into {target}"), list.trim_end().to_string())
 }

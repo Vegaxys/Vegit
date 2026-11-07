@@ -484,6 +484,7 @@ fn composer(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
     }
     ui.add_space(6.0);
     ui.checkbox(&mut tab.amend, RichText::new("Amend previous commit").color(pal.text2()));
+    crate::ui_quick::identity_form(ui, tab, pal, acts);
 
     // Summary and description share one box, like a single message field.
     egui::Frame::new()

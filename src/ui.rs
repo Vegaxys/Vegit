@@ -31,19 +31,27 @@ impl eframe::App for VegitApp {
             self.actions.push(Action::Refresh);
         }
         let window = ui.max_rect();
+        if ctx.input(|i| i.key_pressed(egui::Key::F9)) {
+            self.shuffle_backdrop();
+        }
+        // Canvas and halftone on the background layer; every frame around the tiles is
+        // transparent so the pattern shows between them.
+        let look = self.backdrop_look();
+        let bg = ctx.layer_painter(egui::LayerId::background());
+        crate::backdrop::paint(&bg, window, &look, pal.canvas, pal.accent);
         let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         if !maximized {
             resize_edges(&ctx, window);
         }
 
         egui::Panel::top("tabs")
-            .frame(egui::Frame::new().fill(pal.canvas).inner_margin(egui::Margin { left: 8, right: 8, top: 6, bottom: 4 }))
+            .frame(egui::Frame::new().fill(Color32::TRANSPARENT).inner_margin(egui::Margin { left: 8, right: 8, top: 6, bottom: 0 }))
             .show_separator_line(false)
             .show(ui, |ui| self.tab_strip(ui, &pal));
 
         if self.show_home || self.tabs.is_empty() {
             egui::CentralPanel::default()
-                .frame(egui::Frame::new().fill(pal.canvas).inner_margin(egui::Margin::same(24)))
+                .frame(egui::Frame::new().fill(Color32::TRANSPARENT).inner_margin(egui::Margin::same(24)))
                 .show(ui, |ui| self.home(ui, &pal));
         } else {
             self.repo_view(ui, &pal);
@@ -106,41 +114,83 @@ impl VegitApp {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
         }
         ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(vec2(28.0, 24.0), Sense::hover());
-            icons::paint_logo(ui.painter(), r);
-            ui.label(RichText::new("Vegit").strong().size(15.0));
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let (r, _) = ui.allocate_exact_size(vec2(28.0, TAB_H), Sense::hover());
+            icons::paint_logo(ui.painter(), Rect::from_center_size(r.center() - vec2(0.0, 2.0), vec2(24.0, 24.0)));
+            ui.add_space(6.0);
+            let (lr, _) = ui.allocate_exact_size(vec2(44.0, TAB_H), Sense::hover());
+            ui.painter().text(lr.left_center() - vec2(0.0, 2.0), egui::Align2::LEFT_CENTER, "Vegit", egui::FontId::proportional(13.5), pal.text);
             ui.add_space(14.0);
 
+            // Tabs: the active one is a raised piece of the header tile below it (rounded top,
+            // flared bottom corners); the others are plain labels split by thin bars.
+            self.active_tab_rect = None;
+            let name_font = egui::FontId::proportional(14.5);
+            let mut prev_inactive = false;
             for i in 0..self.tabs.len() {
                 let active = i == self.active && !self.show_home;
-                let t = &self.tabs[i];
-                let fill = if active { pal.panel } else { Color32::TRANSPARENT };
-                let stroke = if active { Stroke::new(1.0, pal.border) } else { Stroke::NONE };
-                egui::Frame::new()
-                    .fill(fill)
-                    .stroke(stroke)
-                    .corner_radius(CornerRadius::same(8))
-                    .inner_margin(egui::Margin::symmetric(10, 3))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let dot = if t.is_sample() { pal.lane(3) } else { pal.lane(0) };
-                            let (r, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
-                            ui.painter().circle_filled(r.center(), 4.0, dot);
-                            let label = if active { RichText::new(&t.name).strong() } else { RichText::new(&t.name).color(pal.muted) };
-                            if ui.add(egui::Button::new(label).frame(false)).clicked() {
-                                self.actions.push(Action::SwitchTab(i));
-                            }
-                            if icons::ghost_button(ui, Icon::Close, 12.0, pal.muted, pal.hover).on_hover_text("Close tab").clicked() {
-                                self.actions.push(Action::CloseTab(i));
-                            }
-                        });
-                    });
+                let name = self.tabs[i].name.clone();
+                let text_w = ui.painter().layout_no_wrap(name.clone(), name_font.clone(), pal.text).size().x.min(220.0);
+                let pad = if active { 28.0 } else { 12.0 };
+                let w = pad + text_w + 10.0 + 22.0 + pad * 0.6;
+                if !active && prev_inactive {
+                    let (sep, _) = ui.allocate_exact_size(vec2(1.0, TAB_H), Sense::hover());
+                    ui.painter().rect_filled(Rect::from_center_size(sep.center() + vec2(0.0, -2.0), vec2(1.5, 20.0)), CornerRadius::ZERO, pal.border);
+                }
+                if active {
+                    ui.add_space(TAB_FLARE);
+                }
+                let (r, resp) = ui.allocate_exact_size(vec2(w, TAB_H), Sense::click());
+                if active {
+                    ui.add_space(TAB_FLARE);
+                    paint_tab_shape(ui.painter(), r, pal);
+                    self.active_tab_rect = Some(r);
+                } else if resp.hovered() {
+                    ui.painter().rect_filled(r.shrink2(vec2(0.0, 5.0)), CornerRadius::same(6), pal.hover);
+                }
+                prev_inactive = !active;
+                let text_col = if active { pal.text } else { pal.text2() };
+                let mut job = egui::text::LayoutJob::simple_singleline(name.clone(), name_font.clone(), text_col);
+                job.wrap = egui::text::TextWrapping::truncate_at_width(text_w);
+                let g = ui.painter().layout_job(job);
+                let ty = r.center().y - g.size().y / 2.0 - 1.0;
+                ui.painter().galley(pos2(r.left() + pad, ty), g, text_col);
+                // Close cross at the right of the name.
+                let close = Rect::from_center_size(pos2(r.right() - pad * 0.6 - 11.0, r.center().y - 1.0), vec2(20.0, 20.0));
+                let cr = ui.interact(close, ui.scope_id().with(("close_tab", i)), Sense::click());
+                if cr.hovered() {
+                    ui.painter().rect_filled(close, CornerRadius::same(4), pal.hover);
+                }
+                let c = close.center();
+                let xs = Stroke::new(1.5, if cr.hovered() { pal.text } else { pal.accent.gamma_multiply(0.8) });
+                ui.painter().line_segment([c - vec2(4.5, 4.5), c + vec2(4.5, 4.5)], xs);
+                ui.painter().line_segment([c + vec2(-4.5, 4.5), c + vec2(4.5, -4.5)], xs);
+                if cr.on_hover_text("Close tab").clicked() {
+                    self.actions.push(Action::CloseTab(i));
+                } else if resp.on_hover_text(name).clicked() {
+                    self.actions.push(Action::SwitchTab(i));
+                }
             }
-            if ui.add(egui::Button::new(RichText::new("+").strong()).corner_radius(CornerRadius::same(8))).on_hover_text("Open, clone or create a repository").clicked() {
+            if prev_inactive {
+                let (sep, _) = ui.allocate_exact_size(vec2(1.0, TAB_H), Sense::hover());
+                ui.painter().rect_filled(Rect::from_center_size(sep.center() + vec2(0.0, -2.0), vec2(1.5, 20.0)), CornerRadius::ZERO, pal.border);
+            }
+            // "+" opens the home screen (open, clone or create).
+            let (pr, presp) = ui.allocate_exact_size(vec2(34.0, TAB_H), Sense::click());
+            let plus = Rect::from_center_size(pr.center() - vec2(0.0, 2.0), vec2(26.0, 26.0));
+            if presp.hovered() || self.show_home {
+                ui.painter().rect_filled(plus, CornerRadius::same(6), if self.show_home { pal.selected } else { pal.hover });
+            }
+            let c = plus.center();
+            let ps = Stroke::new(1.6, pal.accent);
+            ui.painter().line_segment([c - vec2(7.0, 0.0), c + vec2(7.0, 0.0)], ps);
+            ui.painter().line_segment([c - vec2(0.0, 7.0), c + vec2(0.0, 7.0)], ps);
+            if presp.on_hover_text("Open, clone or create a repository").clicked() {
                 self.actions.push(Action::ShowHome);
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
                 window_buttons(ui, pal);
                 ui.add_space(6.0);
                 let access_btn = egui::Button::image_and_text(icons::image(ui.ctx(), Icon::Key, 16.0, pal.text), "Access").corner_radius(CornerRadius::same(8));
@@ -190,11 +240,13 @@ impl VegitApp {
         let show_desc = self.settings.show_descriptions;
         let sort_by_status = self.settings.sort_by_status;
         let columns = &mut self.settings.columns;
+        let columns_visible = &mut self.settings.columns_visible;
+        let compact_graph = &mut self.settings.compact_graph;
         let tab = &mut self.tabs[active];
         let g = GAP;
 
         egui::Panel::top("header")
-            .frame(egui::Frame::new().fill(pal.canvas).inner_margin(egui::Margin { left: g * 2, right: g * 2, top: 0, bottom: g }))
+            .frame(egui::Frame::new().fill(Color32::TRANSPARENT).inner_margin(egui::Margin { left: g * 2, right: g * 2, top: 0, bottom: g }))
             .show_separator_line(false)
             .show(ui, |ui| {
                 // One slim tile for the whole header: repository, actions, sync, changes, search.
@@ -271,6 +323,10 @@ impl VegitApp {
                         }
                         push.context_menu(|ui| {
                             crate::util::menu_pad(ui);
+                            if ui.button("Push…").on_hover_text("Choose the remote, the branch name on the server and the tags to send").clicked() {
+                                acts.push(Action::OpenPushDialog);
+                                ui.close();
+                            }
                             if ui.button("Force push (safely, with lease)").clicked() {
                                 acts.push(Action::Dialog(Dialog::Confirm {
                                     title: "Force push?".into(),
@@ -351,14 +407,29 @@ impl VegitApp {
                                     if ui.add_enabled(conflicts == 0, accent_button("Continue", pal)).clicked() {
                                         acts.push(Action::Git { label: format!("{} continued", op.label()), args: vec![op.command().into(), "--continue".into()], background: false });
                                     }
+                                    if op.can_skip()
+                                        && ui
+                                            .button("Skip this commit")
+                                            .on_hover_text(format!("git {} --skip\nDrops the commit it stopped on and goes on with the next one.", op.command()))
+                                            .clicked()
+                                    {
+                                        acts.push(Action::Git { label: "Commit skipped".into(), args: vec![op.command().into(), "--skip".into()], background: false });
+                                    }
                                 });
                             });
                         });
                 }
             });
 
+        // The active tab and the header tile are one piece: hide the tile's top border
+        // under the tab.
+        if let Some(t) = self.active_tab_rect {
+            let y = t.bottom();
+            ui.painter().rect_filled(Rect::from_min_max(pos2(t.left() + 1.0, y - 1.0), pos2(t.right() - 1.0, y + 1.5)), CornerRadius::ZERO, pal.panel);
+        }
+
         egui::Panel::bottom("statusbar")
-            .frame(egui::Frame::new().fill(pal.canvas).inner_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 4 }))
+            .frame(egui::Frame::new().fill(Color32::TRANSPARENT).inner_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 4 }))
             .show_separator_line(false)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -379,7 +450,7 @@ impl VegitApp {
                 });
             });
 
-        let side_frame = |left: i8, right: i8| egui::Frame::new().fill(pal.canvas).inner_margin(egui::Margin { left, right, top: 0, bottom: g });
+        let side_frame = |left: i8, right: i8| egui::Frame::new().fill(Color32::TRANSPARENT).inner_margin(egui::Margin { left, right, top: 0, bottom: g });
         egui::Panel::left("sidebar")
             .default_size(260.0)
             .size_range(190.0..=440.0)
@@ -395,7 +466,7 @@ impl VegitApp {
             .show(ui, |ui| fill_tile(ui, pal, |ui| ui_detail::show(ui, tab, pal, tree, sort_by_status, &mut acts)));
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(pal.canvas).inner_margin(egui::Margin { left: g, right: g, top: 0, bottom: g }))
+            .frame(egui::Frame::new().fill(Color32::TRANSPARENT).inner_margin(egui::Margin { left: g, right: g, top: 0, bottom: g }))
             .show(ui, |ui| {
                 fill_tile(ui, pal, |ui| {
                     if tab.loading {
@@ -407,7 +478,7 @@ impl VegitApp {
                     } else if tab.snap.commits.is_empty() && !tab.has_wip_row() {
                         ui.centered_and_justified(|ui| ui.label(RichText::new("This repository has no commits yet.").color(pal.muted)));
                     } else {
-                        ui_graph::show(ui, tab, pal, columns, show_desc, &mut acts);
+                        ui_graph::show(ui, tab, pal, columns, columns_visible, compact_graph, show_desc, &mut acts);
                     }
                 });
             });
@@ -421,113 +492,174 @@ impl VegitApp {
         let busy = !self.busy.is_empty();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.vertical_centered(|ui| {
-                ui.set_max_width(860.0);
                 ui.add_space(12.0);
                 ui.label(RichText::new("Welcome to Vegit").size(34.0).strong());
                 ui.label(RichText::new("See your project's history, stage changes and share your work.").color(pal.muted));
                 ui.add_space(20.0);
-                ui.spacing_mut().item_spacing = vec2(GAP as f32 * 1.5, GAP as f32 * 1.5);
-                ui.columns(2, |cols| {
-                    tile(pal).show(&mut cols[0], |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(RichText::new("Open a repository").strong().size(18.0));
-                        ui.label(RichText::new("Pick a folder that is already a git project.").color(pal.muted));
-                        ui.add_space(8.0);
-                        ui.add(egui::TextEdit::singleline(&mut self.home.open_path).hint_text("C:\\path\\to\\project").desired_width(f32::INFINITY));
-                        ui.horizontal(|ui| {
-                            if ui.button("Browse…").clicked() {
-                                if let Some(p) = rfd::FileDialog::new().set_title("Open a repository").pick_folder() {
-                                    self.home.open_path = p.display().to_string();
-                                    acts.push(Action::OpenRepo(p));
-                                }
+            });
+            // Tiles are placed in exact rectangles: one width for the block, the same gap
+            // between every tile and between rows, nothing sticking out on the right.
+            let gap = 10.0;
+            let full = ui.available_width();
+            let width = full.min(880.0);
+            let x0 = ui.cursor().left() + (full - width) / 2.0;
+            let mut y = ui.cursor().top();
+            let rect_of = |i: usize, n: usize, y: f32| {
+                let w = (width - gap * (n as f32 - 1.0)) / n as f32;
+                Rect::from_min_size(pos2(x0 + i as f32 * (w + gap), y), vec2(w, 10_000.0))
+            };
+            let mut bottom = y;
+            let place = |ui: &mut egui::Ui, r: Rect, f: &mut dyn FnMut(&mut egui::Ui)| {
+                let got = ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| f(ui)).response.rect;
+                got.bottom()
+            };
+
+            // Row 1: open and clone.
+            bottom = bottom.max(place(ui, rect_of(0, 2, y), &mut |ui| {
+                home_tile(ui, pal, "row0", |ui| {
+                    ui.label(RichText::new("Open a repository").strong().size(18.0));
+                    ui.label(RichText::new("Pick a folder that is already a git project.").color(pal.muted));
+                }, |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.home.open_path).hint_text("C:\\path\\to\\project").desired_width(f32::INFINITY));
+                    ui.horizontal(|ui| {
+                        if ui.button("Browse…").clicked() {
+                            if let Some(p) = rfd::FileDialog::new().set_title("Open a repository").pick_folder() {
+                                self.home.open_path = p.display().to_string();
+                                acts.push(Action::OpenRepo(p));
                             }
-                            if ui.add_enabled(!self.home.open_path.trim().is_empty(), accent_button("Open", pal)).clicked() {
-                                acts.push(Action::OpenRepo(PathBuf::from(self.home.open_path.trim())));
-                            }
-                        });
+                        }
+                        if ui.add_enabled(!self.home.open_path.trim().is_empty(), accent_button("Open", pal)).clicked() {
+                            acts.push(Action::OpenRepo(PathBuf::from(self.home.open_path.trim())));
+                        }
                     });
-                    tile(pal).show(&mut cols[1], |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(RichText::new("Clone from a URL").strong().size(18.0));
-                        ui.label(RichText::new("Public or private: for a private one a sign-in window opens, or use Access first.").color(pal.muted));
-                        ui.add_space(8.0);
-                        ui.add(egui::TextEdit::singleline(&mut self.home.clone_url).hint_text("https://github.com/team/project.git").desired_width(f32::INFINITY));
-                        ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut self.home.clone_dest).desired_width(ui.available_width() - 80.0));
+                });
+            }));
+            bottom = bottom.max(place(ui, rect_of(1, 2, y), &mut |ui| {
+                home_tile(ui, pal, "row0", |ui| {
+                    ui.label(RichText::new("Clone from a URL").strong().size(18.0));
+                    ui.label(RichText::new("Public or private: for a private one a sign-in window opens, or use Access first.").color(pal.muted));
+                }, |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.home.clone_url).hint_text("https://github.com/team/project.git").desired_width(f32::INFINITY));
+                    // Button first from the right, then the field takes exactly what is left,
+                    // so the row never pushes the tile wider.
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("Browse…").clicked() {
                                 if let Some(p) = rfd::FileDialog::new().set_title("Clone into which folder?").pick_folder() {
                                     self.home.clone_dest = p.display().to_string();
                                 }
                             }
+                            ui.add(egui::TextEdit::singleline(&mut self.home.clone_dest).desired_width(ui.available_width()));
                         });
-                        let url = self.home.clone_url.trim().to_string();
-                        if ui.add_enabled(!url.is_empty() && !busy, accent_button("Clone", pal)).clicked() {
-                            let name = url.trim_end_matches('/').trim_end_matches(".git").rsplit(['/', ':']).next().unwrap_or("repo").to_string();
-                            let dest = PathBuf::from(self.home.clone_dest.trim()).join(name);
-                            acts.push(Action::Clone { url, dest });
-                        }
                     });
+                    let url = self.home.clone_url.trim().to_string();
+                    if ui.add_enabled(!url.is_empty() && !busy, accent_button("Clone", pal)).clicked() {
+                        let name = url.trim_end_matches('/').trim_end_matches(".git").rsplit(['/', ':']).next().unwrap_or("repo").to_string();
+                        let dest = PathBuf::from(self.home.clone_dest.trim()).join(name);
+                        acts.push(Action::Clone { url, dest });
+                    }
                 });
-                ui.columns(3, |cols| {
-                    tile(pal).show(&mut cols[0], |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(RichText::new("New repository").strong().size(18.0));
-                        ui.label(RichText::new("Turn a folder into a git project.").color(pal.muted));
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut self.home.init_path).hint_text("Folder").desired_width(ui.available_width() - 80.0));
+            }));
+            y = bottom + gap;
+
+            // Row 2: new, private access, sample. Their actions sit at the bottom left.
+            bottom = bottom.max(place(ui, rect_of(0, 3, y), &mut |ui| {
+                home_tile(ui, pal, "row1", |ui| {
+                    ui.label(RichText::new("New repository").strong().size(18.0));
+                    ui.label(RichText::new("Turn a folder into a git project.").color(pal.muted));
+                }, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("Browse…").clicked() {
                                 if let Some(p) = rfd::FileDialog::new().set_directory(dirs_home()).pick_folder() {
                                     self.home.init_path = p.display().to_string();
                                 }
                             }
+                            ui.add(egui::TextEdit::singleline(&mut self.home.init_path).hint_text("Folder").desired_width(ui.available_width()));
                         });
-                        if ui.add_enabled(!self.home.init_path.trim().is_empty(), accent_button("Create", pal)).clicked() {
-                            acts.push(Action::InitRepo(PathBuf::from(self.home.init_path.trim())));
-                        }
                     });
-                    tile(pal).show(&mut cols[1], |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(RichText::new("Private repositories").strong().size(18.0));
-                        ui.label(RichText::new("Sign in once with a token or an SSH key. Free, like git itself.").color(pal.muted));
-                        ui.add_space(8.0);
-                        if ui.add(accent_button("Set up access", pal)).clicked() {
-                            acts.push(Action::Dialog(Dialog::Access(AccessForm { host: "github.com".into(), ..Default::default() })));
-                        }
-                    });
-                    tile(pal).show(&mut cols[2], |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(RichText::new("Try the sample").strong().size(18.0));
-                        ui.label(RichText::new("A small made-up project. Nothing on disk is touched.").color(pal.muted));
-                        ui.add_space(8.0);
-                        if ui.button("Open the sample").clicked() {
-                            acts.push(Action::OpenSample);
-                        }
-                    });
+                    if ui.add_enabled(!self.home.init_path.trim().is_empty(), accent_button("Create", pal)).clicked() {
+                        acts.push(Action::InitRepo(PathBuf::from(self.home.init_path.trim())));
+                    }
                 });
-                if !self.settings.recent.is_empty() {
-                    tile(pal).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
+            }));
+            bottom = bottom.max(place(ui, rect_of(1, 3, y), &mut |ui| {
+                home_tile(ui, pal, "row1", |ui| {
+                    ui.label(RichText::new("Private repositories").strong().size(18.0));
+                    ui.label(RichText::new("Sign in once with a token or an SSH key. Free, like git itself.").color(pal.muted));
+                }, |ui| {
+                    if ui.add(accent_button("Set up access", pal)).clicked() {
+                        acts.push(Action::Dialog(Dialog::Access(AccessForm { host: "github.com".into(), ..Default::default() })));
+                    }
+                });
+            }));
+            bottom = bottom.max(place(ui, rect_of(2, 3, y), &mut |ui| {
+                home_tile(ui, pal, "row1", |ui| {
+                    ui.label(RichText::new("Try the sample").strong().size(18.0));
+                    ui.label(RichText::new("A small made-up project. Nothing on disk is touched.").color(pal.muted));
+                }, |ui| {
+                    if ui.button("Open the sample").clicked() {
+                        acts.push(Action::OpenSample);
+                    }
+                });
+            }));
+            y = bottom + gap;
+
+            // Recent: each line is one big clickable row.
+            if !self.settings.recent.is_empty() {
+                let recent = self.settings.recent.clone();
+                bottom = bottom.max(place(ui, rect_of(0, 1, y), &mut |ui| {
+                    home_tile(ui, pal, "recent", |ui| {
                         ui.label(RichText::new("Recent").strong().size(18.0));
-                        for r in &self.settings.recent {
-                            ui.horizontal(|ui| {
-                                let name = std::path::Path::new(r).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| r.clone());
-                                if ui.link(RichText::new(name).strong()).clicked() {
-                                    acts.push(Action::OpenRepo(PathBuf::from(r)));
-                                }
-                                ui.label(RichText::new(r).color(pal.muted).size(11.5));
-                            });
+                        ui.add_space(2.0);
+                        for r in &recent {
+                            let name = std::path::Path::new(r).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| r.clone());
+                            let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+                            let p = ui.painter();
+                            if resp.hovered() {
+                                p.rect_filled(row, CornerRadius::same(5), pal.hover);
+                            }
+                            let g = p.layout_no_wrap(name, egui::FontId::proportional(14.0), pal.text);
+                            let w = g.size().x;
+                            p.galley(pos2(row.left() + 8.0, row.center().y - g.size().y / 2.0), g, pal.text);
+                            p.text(pos2(row.left() + 18.0 + w, row.center().y), egui::Align2::LEFT_CENTER, r, egui::FontId::proportional(12.0), pal.muted);
+                            if resp.on_hover_text("Open this repository").clicked() {
+                                acts.push(Action::OpenRepo(PathBuf::from(r)));
+                            }
                         }
-                    });
-                }
-            });
+                    }, |_| {});
+                }));
+            }
+            // Tell the scroll area how tall the content is.
+            let used = Rect::from_min_max(pos2(x0, ui.min_rect().top()), pos2(x0 + width, bottom + 16.0));
+            ui.allocate_rect(used, Sense::hover());
         });
+        // Tiles of a row take the height of the tallest one, measured on the previous frame.
+        let ctx = ui.ctx().clone();
+        let mut changed = false;
+        ctx.data_mut(|d| {
+            for row in ["row0", "row1", "recent"] {
+                let id = egui::Id::unique(("home_row", row));
+                let next: f32 = d.get_temp(id.with("next")).unwrap_or(0.0);
+                let cur: f32 = d.get_temp(id).unwrap_or(0.0);
+                if (next - cur).abs() > 0.5 {
+                    d.insert_temp(id, next);
+                    changed = true;
+                }
+                d.insert_temp(id.with("next"), 0.0f32);
+            }
+        });
+        if changed {
+            ctx.request_repaint();
+        }
         self.actions.extend(acts);
     }
 
     fn dialogs(&mut self, ctx: &egui::Context, pal: &Palette) {
         let Some(mut dialog) = self.dialog.take() else { return };
         let settings = &mut self.settings;
+        let tab = if self.show_home { None } else { self.tabs.get(self.active) };
+        let identity = tab.filter(|t| !t.loading).map(|t| &t.snap.identity);
         let mut keep = true;
         let mut acts = Vec::new();
         let modal = egui::Modal::new(egui::Id::unique("dialog"))
@@ -537,7 +669,7 @@ impl VegitApp {
                     Dialog::NewPullRequest(_) => 620.0,
                     Dialog::Access(_) => 540.0,
                     Dialog::Settings => 700.0,
-                    _ => 400.0,
+                    ref d => crate::ui_quick::width(d).unwrap_or(400.0),
                 });
                 let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
                 match &mut dialog {
@@ -581,7 +713,7 @@ impl VegitApp {
                                 args.push(name.trim().into());
                             }
                             args.push(at.clone());
-                            acts.push(Action::Git { label: format!("Tagged {}", name.trim()), args, background: false });
+                            acts.push(Action::CreateTag { name: name.trim().to_string(), args });
                             keep = false;
                         }
                     }
@@ -616,7 +748,12 @@ impl VegitApp {
                         }
                     }
                     Dialog::Access(form) => access_dialog(ui, form, pal, &mut acts),
-                    Dialog::Settings => settings_dialog(ui, settings, pal),
+                    Dialog::Settings => settings_dialog(ui, settings, identity, pal, &mut acts),
+                    d => {
+                        if crate::ui_quick::dialog(ui, d, tab, pal, &mut acts) {
+                            keep = false;
+                        }
+                    }
                 }
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) || ui.data(|d| d.get_temp::<bool>(egui::Id::unique("dialog_cancel"))).unwrap_or(false) {
                     keep = false;
@@ -644,6 +781,7 @@ impl VegitApp {
             .show(ctx, |ui| {
                 ui.set_max_width(400.0);
                 let mut dismiss = None;
+                let mut chosen = None;
                 for (i, t) in self.toasts.iter().enumerate() {
                     let color = match t.kind {
                         ToastKind::Info => pal.accent,
@@ -659,14 +797,33 @@ impl VegitApp {
                         .show(ui, |ui| {
                             let r = ui.max_rect();
                             ui.painter().circle_filled(pos2(r.left() - 7.0, r.top() + 8.0), 3.5, color);
-                            ui.label(RichText::new(&t.text).color(pal.text));
+                            match &t.action {
+                                // Text on the left, the follow-up button on the right.
+                                Some((label, action)) => {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(&t.text).color(pal.text));
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if ui.add(accent_button(label, pal)).clicked() {
+                                                chosen = Some((i, action.clone()));
+                                            }
+                                        });
+                                    });
+                                }
+                                None => {
+                                    ui.label(RichText::new(&t.text).color(pal.text));
+                                }
+                            }
                         })
-                        .response
-                        .interact(Sense::click());
-                    if resp.clicked() {
+                        .response;
+                    // A toast with a button is closed by the button, so the click lands on it.
+                    if t.action.is_none() && resp.interact(Sense::click()).clicked() {
                         dismiss = Some(i);
                     }
                     ui.add_space(6.0);
+                }
+                if let Some((i, action)) = chosen {
+                    self.actions.push(action);
+                    dismiss = Some(i);
                 }
                 if let Some(i) = dismiss {
                     self.toasts.remove(i);
@@ -895,7 +1052,7 @@ fn font_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<String>, preset_la
 
 /// The settings window: appearance (preset, interface colour, fonts, branch colours)
 /// and graph options. Changes apply immediately and are saved with the window.
-fn settings_dialog(ui: &mut egui::Ui, s: &mut Settings, pal: &Palette) {
+fn settings_dialog(ui: &mut egui::Ui, s: &mut Settings, identity: Option<&git::Identity>, pal: &Palette, acts: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("Settings").size(22.0).strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -988,6 +1145,51 @@ fn settings_dialog(ui: &mut egui::Ui, s: &mut Settings, pal: &Palette) {
         ui.add_space(8.0);
         card(pal).show(ui, |ui| {
             ui.set_width(ui.available_width());
+            ui.label(RichText::new("Background").strong());
+            ui.label(RichText::new("A halftone pattern behind the tiles, in the interface colour.").size(12.0).color(pal.muted));
+            ui.add_space(4.0);
+            egui::CollapsingHeader::new(RichText::new("Advanced background settings").color(pal.text2()))
+                .id_salt("bg_advanced")
+                .default_open(true)
+                .show(ui, |ui| {
+                    use crate::backdrop::{Gradient, Graphic};
+                    egui::Grid::new("bg_grid").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                        ui.label(RichText::new("Pattern type").color(pal.text2()));
+                        egui::ComboBox::from_id_salt("bg_graphic").width(220.0).selected_text(s.bg_graphic.label()).show_ui(ui, |ui| {
+                            crate::util::menu_pad(ui);
+                            for g in Graphic::ALL {
+                                ui.selectable_value(&mut s.bg_graphic, g, g.label());
+                            }
+                        });
+                        ui.end_row();
+                        let random = s.bg_graphic == Graphic::Random;
+                        ui.label(RichText::new("Gradient").color(pal.text2()));
+                        ui.add_enabled_ui(!random, |ui| {
+                            egui::ComboBox::from_id_salt("bg_gradient").width(220.0).selected_text(s.bg_gradient.label()).show_ui(ui, |ui| {
+                                crate::util::menu_pad(ui);
+                                for g in Gradient::ALL {
+                                    ui.selectable_value(&mut s.bg_gradient, g, g.label());
+                                }
+                            });
+                        })
+                        .response
+                        .on_hover_text("How the halftone is sampled: which areas get big shapes and which get small ones.");
+                        ui.end_row();
+                        ui.label(RichText::new("Strength").color(pal.text2()));
+                        ui.add(egui::Slider::new(&mut s.bg_strength, 0.0..=1.0).show_value(false));
+                        ui.end_row();
+                        ui.label(RichText::new("Cell size").color(pal.text2()));
+                        ui.add(egui::Slider::new(&mut s.bg_cell, 8.0..=40.0).step_by(1.0).suffix(" pt"));
+                        ui.end_row();
+                    });
+                    if s.bg_graphic == Graphic::Random {
+                        ui.label(RichText::new("Random picks a pattern and a gradient at each launch; F9 picks another.").size(12.0).color(pal.muted));
+                    }
+                });
+        });
+        ui.add_space(8.0);
+        card(pal).show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.label(RichText::new("History graph").strong());
             ui.add_space(4.0);
             ui.checkbox(&mut s.pin_head, "Keep the current branch on the left of the graph");
@@ -995,8 +1197,14 @@ fn settings_dialog(ui: &mut egui::Ui, s: &mut Settings, pal: &Palette) {
             ui.checkbox(&mut s.show_avatars, "Show profile pictures")
                 .on_hover_text("Asks Gravatar (or GitHub for GitHub addresses) with a hash of each author's e-mail.");
             if ui.button("Reset column widths").clicked() {
-                s.columns = Settings::default().columns;
+                s.columns = crate::app::DEFAULT_COLUMNS;
+                s.columns_visible = [true; 6];
             }
+        });
+        ui.add_space(8.0);
+        card(pal).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            crate::ui_quick::identity_card(ui, identity, pal, acts);
         });
     });
     ui.add_space(10.0);
@@ -1187,6 +1395,86 @@ fn resize_edges(ctx: &egui::Context, window: Rect) {
     }
 }
 
+/// A home-screen tile: its body at the top, its footer (inputs and buttons) at the bottom
+/// left, and the height of the tallest tile of the same row (measured on the previous frame).
+fn home_tile(ui: &mut egui::Ui, pal: &Palette, row: &str, body: impl FnOnce(&mut egui::Ui), footer: impl FnOnce(&mut egui::Ui)) {
+    let id = egui::Id::unique(("home_row", row));
+    let target: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(0.0);
+    // Remember this tile's footer height between frames (tiles are told apart by position).
+    let foot_id = egui::Id::unique(("home_foot", row, ui.max_rect().left() as i32));
+    let foot_prev: f32 = ui.data(|d| d.get_temp(foot_id)).unwrap_or(0.0);
+    tile(pal).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+            let spacing = ui.spacing().item_spacing.y;
+            // Measure the parts alone (scopes), so the padding never feeds on itself.
+            let body_h = ui.scope(|ui| body(ui)).response.rect.height();
+            let gap_min = 8.0;
+            let extra = (target - body_h - foot_prev - 2.0 * spacing - gap_min).max(0.0);
+            ui.add_space(gap_min + extra);
+            let foot_h = ui.scope(|ui| footer(ui)).response.rect.height();
+            let natural = body_h + foot_h + 2.0 * spacing + gap_min;
+            ui.data_mut(|d| {
+                d.insert_temp(foot_id, foot_h);
+                let key = id.with("next");
+                let m: f32 = d.get_temp(key).unwrap_or(0.0);
+                d.insert_temp(key, m.max(natural));
+            });
+        });
+    });
+}
+
+/// Height of the tab strip; tabs touch the header tile right below it.
+const TAB_H: f32 = 36.0;
+/// Radius of the curves where the active tab flares into the header tile.
+const TAB_FLARE: f32 = 8.0;
+
+/// The active tab: rounded top corners and inverted curves at the bottom, so it flows into
+/// the header tile like a folder tab. Filled with the tile colour and outlined like it.
+fn paint_tab_shape(p: &egui::Painter, r: Rect, pal: &Palette) {
+    use egui::epaint::{Mesh, PathShape};
+    let (l, rt, t, b) = (r.left(), r.right(), r.top(), r.bottom());
+    let top_r = 8.0;
+    let f = TAB_FLARE;
+    // Body.
+    p.rect_filled(Rect::from_min_max(pos2(l, t), pos2(rt, b + 1.0)), CornerRadius { nw: top_r as u8, ne: top_r as u8, sw: 0, se: 0 }, pal.panel);
+    // Flares: a fan from the bottom corner to a quarter circle bulging toward it.
+    let arc = |cx: f32, cy: f32, a0: f32, a1: f32| -> Vec<egui::Pos2> {
+        (0..=10).map(|k| {
+            let a = a0 + (a1 - a0) * k as f32 / 10.0;
+            pos2(cx + f * a.cos(), cy + f * a.sin())
+        }).collect()
+    };
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let left_arc = arc(l - f, b - f, FRAC_PI_2, 0.0); // from (l-f, b) to (l, b-f)
+    let right_arc = arc(rt + f, b - f, FRAC_PI_2, PI); // from (rt+f, b) to (rt, b-f)
+    for (corner, pts) in [(pos2(l, b), &left_arc), (pos2(rt, b), &right_arc)] {
+        let mut mesh = Mesh::default();
+        mesh.colored_vertex(corner, pal.panel);
+        for q in pts.iter() {
+            mesh.colored_vertex(*q, pal.panel);
+        }
+        for k in 1..pts.len() as u32 {
+            mesh.add_triangle(0, k, k + 1);
+        }
+        p.add(egui::Shape::mesh(mesh));
+    }
+    // Outline: left flare, up, over the top, down, right flare.
+    let mut outline: Vec<egui::Pos2> = left_arc.clone();
+    outline.push(pos2(l, t + top_r));
+    outline.extend((0..=6).map(|k| {
+        let a = PI + FRAC_PI_2 * k as f32 / 6.0;
+        pos2(l + top_r + top_r * a.cos(), t + top_r + top_r * a.sin())
+    }));
+    outline.extend((0..=6).map(|k| {
+        let a = PI + FRAC_PI_2 + FRAC_PI_2 * k as f32 / 6.0;
+        pos2(rt - top_r + top_r * a.cos(), t + top_r + top_r * a.sin())
+    }));
+    outline.push(pos2(rt, b - f));
+    outline.extend(right_arc.iter().rev().copied());
+    p.add(PathShape::line(outline, Stroke::new(1.0, pal.border)));
+}
+
 /// Thin vertical line between groups of the header.
 fn divider(ui: &mut egui::Ui, pal: &Palette) {
     let (r, _) = ui.allocate_exact_size(vec2(1.0, 26.0), Sense::hover());
@@ -1194,7 +1482,7 @@ fn divider(ui: &mut egui::Ui, pal: &Palette) {
 }
 
 /// Cancel / confirm buttons at the bottom of a dialog. Returns true when confirmed.
-fn footer(ui: &mut egui::Ui, pal: &Palette, confirm: &str, enabled: bool) -> bool {
+pub(crate) fn footer(ui: &mut egui::Ui, pal: &Palette, confirm: &str, enabled: bool) -> bool {
     ui.add_space(10.0);
     let mut confirmed = false;
     ui.horizontal(|ui| {

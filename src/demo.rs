@@ -87,6 +87,7 @@ pub fn snapshot() -> Snapshot {
         upstream: up.map(str::to_string),
         ahead,
         behind,
+        gone: false,
     };
     let refs = vec![
         r("main", RefKind::Local, 30, Some("origin/main"), 1, 0),
@@ -95,6 +96,8 @@ pub fn snapshot() -> Snapshot {
         r("origin/main", RefKind::Remote, 29, None, 0, 0),
         r("origin/feature/login", RefKind::Remote, 31, None, 0, 0),
         r("v1.4.0", RefKind::Tag, 25, None, 0, 0),
+        r("v1.4.0-android", RefKind::Tag, 25, None, 0, 0),
+        r("release/1.4", RefKind::Local, 25, None, 0, 0),
         r("v1.3.0", RefKind::Tag, 15, None, 0, 0),
     ];
 
@@ -117,6 +120,12 @@ pub fn snapshot() -> Snapshot {
         remotes: vec!["origin".into()],
         submodules: vec!["libs/shared-ui".into()],
         remote_urls: vec![("origin".into(), "https://github.com/acme/sample-project.git".into())],
+        identity: crate::git::Identity {
+            global_name: Some("Alex Martin".into()),
+            global_email: Some("alex@example.com".into()),
+            local_name: None,
+            local_email: None,
+        },
     }
 }
 

@@ -12,29 +12,55 @@ use crate::forge;
 use crate::git::{self, RefKind};
 use crate::icons::{self, Icon};
 use crate::theme::Palette;
-use crate::util::{abs_time, avatar, rel_time};
+use crate::util::{abs_time, avatar, short_date_time};
 
 const ROW_H: f32 = 30.0;
 const HEAD_H: f32 = 26.0;
 const LANE_W: f32 = 16.0;
-const MIN_COL: [f32; 6] = [70.0, 40.0, 160.0, 70.0, 60.0, 50.0];
-const LABELS: [&str; 6] = ["BRANCH / TAG", "GRAPH", "COMMIT MESSAGE", "AUTHOR", "WHEN", "ID"];
+const MIN_COL: [f32; 6] = [70.0, 40.0, 160.0, 70.0, 118.0, 50.0];
+const LABELS: [&str; 6] = ["BRANCH / TAG", "GRAPH", "COMMIT MESSAGE", "AUTHOR", "DATE / TIME", "SHA"];
+const MENU_NAMES: [&str; 6] = ["Branch / Tag", "Graph", "Commit message", "Author", "Date / Time", "Sha"];
+/// Room kept at the right of the header for the column settings button.
+const GEAR_W: f32 = 28.0;
 /// Room an icon takes inside a ref label: the icon itself and the gap after it.
 const PILL_ICON_W: f32 = 15.0;
 
-pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f32; 6], show_desc: bool, acts: &mut Vec<Action>) {
+#[allow(clippy::too_many_arguments)]
+pub fn show(
+    ui: &mut egui::Ui,
+    tab: &mut RepoTab,
+    pal: &Palette,
+    widths: &mut [f32; 6],
+    visible: &mut [bool; 6],
+    compact: &mut bool,
+    show_desc: bool,
+    acts: &mut Vec<Action>,
+) {
     let wip = tab.has_wip_row();
     let offset = usize::from(wip);
     let search = tab.search.trim().to_lowercase();
     let author_filter = tab.author_filter.clone();
+    let lane_w = if *compact { 10.0 } else { LANE_W };
+    if !visible.iter().any(|v| *v) {
+        visible[2] = true;
+    }
+    for i in 0..6 {
+        widths[i] = widths[i].max(MIN_COL[i]);
+    }
 
-    // Effective widths: when the columns are narrower than the tile, the message column
-    // takes the slack so the table always fills the width.
+    // Effective widths: hidden columns take no room, and when the columns are narrower than
+    // the tile the message column (or the last shown one) takes the slack.
     let avail = ui.available_width();
-    let mut eff = *widths;
+    let mut eff = [0.0f32; 6];
+    for i in 0..6 {
+        if visible[i] {
+            eff[i] = widths[i];
+        }
+    }
     let total: f32 = eff.iter().sum();
     if total < avail {
-        eff[2] += avail - total;
+        let slack_col = if visible[2] { 2 } else { (0..6).rev().find(|&i| visible[i]).unwrap_or(2) };
+        eff[slack_col] += avail - total;
     }
     let content_w: f32 = eff.iter().sum();
 
@@ -42,8 +68,14 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f
     let (hrect, _) = ui.allocate_exact_size(vec2(avail, HEAD_H), Sense::hover());
     let hp = ui.painter().with_clip_rect(hrect);
     hp.rect_filled(hrect, CornerRadius::same(10), pal.card);
+    let labels_rect = hrect.with_max_x(hrect.right() - GEAR_W);
+    let hp = hp.with_clip_rect(labels_rect);
     let mut x = hrect.left() - tab.graph_hscroll;
+    let last_visible = (0..6).rev().find(|&i| visible[i]).unwrap_or(2);
     for i in 0..6 {
+        if !visible[i] {
+            continue;
+        }
         let col = Rect::from_min_size(pos2(x, hrect.top()), vec2(eff[i], HEAD_H));
         let label = match (i, &author_filter) {
             (3, Some(a)) => format!("AUTHOR: {a}"),
@@ -83,7 +115,7 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f
         }
         x += eff[i];
         // Resize handle on the column's right edge.
-        if i < 5 {
+        if i != last_visible {
             let handle = Rect::from_center_size(pos2(x, hrect.center().y), vec2(8.0, HEAD_H));
             if hrect.contains(handle.center()) {
                 let r = ui.interact(handle, ui.scope_id().with(("col_resize", i)), Sense::drag());
@@ -97,11 +129,47 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f
                 }
                 if r.double_clicked() && i == 1 {
                     // Double-click the graph edge: fit all lanes.
-                    widths[1] = (tab.graph.width as f32 * LANE_W + 24.0).max(MIN_COL[1]);
+                    widths[1] = (tab.graph.width as f32 * lane_w + 24.0).max(MIN_COL[1]);
                 }
             }
         }
     }
+    // Column settings: which columns show, compact lanes, preset layouts.
+    let gear = Rect::from_center_size(pos2(hrect.right() - GEAR_W / 2.0, hrect.center().y), vec2(22.0, 22.0));
+    let gr = ui.interact(gear, ui.scope_id().with("columns_menu"), Sense::click());
+    if gr.hovered() {
+        ui.painter().rect_filled(gear, CornerRadius::same(5), pal.hover);
+    }
+    icons::paint(ui.painter(), gear.shrink(4.0), Icon::Settings, if gr.hovered() { pal.text } else { pal.muted });
+    let gr = gr.on_hover_text("Columns");
+    egui::Popup::menu(&gr).show(|ui| {
+        crate::util::menu_pad(ui);
+        ui.set_min_width(250.0);
+        for i in 0..6 {
+            let mut on = visible[i];
+            if ui.checkbox(&mut on, MENU_NAMES[i]).changed() {
+                // Keep at least one column.
+                if on || visible.iter().filter(|v| **v).count() > 1 {
+                    visible[i] = on;
+                }
+            }
+        }
+        ui.separator();
+        ui.checkbox(compact, "Compact graph column");
+        ui.separator();
+        if ui.button("Reset columns to default layout").clicked() {
+            *widths = crate::app::DEFAULT_COLUMNS;
+            *visible = [true; 6];
+            *compact = false;
+            ui.close();
+        }
+        if ui.button("Reset columns to compact layout").clicked() {
+            *widths = crate::app::COMPACT_COLUMNS;
+            *visible = [true, true, true, false, true, false];
+            *compact = true;
+            ui.close();
+        }
+    });
     ui.add_space(4.0);
 
     let total_rows = tab.snap.commits.len() + offset;
@@ -109,6 +177,23 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f
     if let Some(row) = tab.scroll_to.take() {
         let viewport_h = ui.available_height();
         scroll = scroll.vertical_scroll_offset((row as f32 * ROW_H - viewport_h * 0.4).max(0.0));
+    }
+    // Middle-click and drag pans the history in both directions.
+    let area = ui.available_rect_before_wrap();
+    let (pressed_here, down, delta) = ui.input(|i| {
+        let here = i.pointer.button_pressed(egui::PointerButton::Middle) && i.pointer.interact_pos().is_some_and(|p| area.contains(p));
+        (here, i.pointer.middle_down(), i.pointer.delta())
+    });
+    if pressed_here {
+        tab.graph_panning = true;
+    }
+    if !down {
+        tab.graph_panning = false;
+    }
+    if tab.graph_panning {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        let target = (tab.graph_offset - delta).max(egui::Vec2::ZERO);
+        scroll = scroll.scroll_offset(target);
     }
 
     // show_rows sizes rows with the current item spacing: zero it first, or rows drift
@@ -129,7 +214,7 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f
             out
         };
         let graph_col = cols_of(Rect::from_min_size(pos2(left, 0.0), vec2(content_w, 1.0)))[1];
-        let x_of = |col: usize| graph_col.left() + 14.0 + col as f32 * LANE_W;
+        let x_of = |col: usize| graph_col.left() + 14.0 + col as f32 * lane_w;
 
         // Pass 1: row backgrounds, text and interaction.
         for row in range.clone() {
@@ -167,6 +252,9 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f
             let rp = painter.with_clip_rect(cols[0].shrink2(vec2(4.0, 0.0)));
             let mut x = cols[0].left() + 8.0;
             let mut pills: Vec<(Rect, usize)> = Vec::new();
+            // "+N" badge position and how many labels it hides; the list it opens.
+            let mut badge: Option<(f32, usize)> = None;
+            let mut badge_list: Option<(Rect, Vec<(usize, String, bool)>)> = None;
             if let Some(st) = &c.stash {
                 let galley = rp.layout_no_wrap(st.clone(), FontId::proportional(12.0), pal.text2());
                 let pill = Rect::from_min_size(pos2(x, rect.center().y - 10.0), vec2(galley.size().x + 14.0 + PILL_ICON_W, 20.0));
@@ -208,22 +296,45 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f
                     }
                 });
                 let count = shown.len();
-                for (n, (i, label, synced)) in shown.into_iter().enumerate() {
+                let right = cols[0].right() - 6.0;
+                let font = FontId::proportional(12.0);
+                let badge_text = |k: usize| format!("+{k}");
+                let badge_w = |k: usize| rp.layout_no_wrap(badge_text(k), FontId::proportional(11.5), pal.text).size().x + 12.0;
+                for (n, (i, label, synced)) in shown.iter().cloned().enumerate() {
                     let r = &tab.snap.refs[i];
                     let is_head = r.kind == RefKind::Local && tab.snap.head_branch.as_deref() == Some(r.name.as_str());
-                    // Branches: solid pill in the lane colour with white text. Tags stay outlined.
-                    // A leading icon tells tags, remotes and the current branch apart; a
-                    // trailing cloud means the remote copy is on this commit too.
+                    // Branches: solid pill in a deeper version of the lane colour so the white
+                    // name stands out. Tags stay outlined.
+                    let pill_fill = deepen(lane_color);
                     let (lead, trail, fill, fg) = match r.kind {
                         RefKind::Tag => (Some(Icon::Tag), None, pal.card, pal.text2()),
-                        RefKind::Remote => (Some(Icon::Cloud), None, lane_color, Color32::WHITE),
-                        RefKind::Local => (is_head.then_some(Icon::Check), synced.then_some(Icon::Cloud), lane_color, Color32::WHITE),
+                        RefKind::Remote => (Some(Icon::Cloud), None, pill_fill, Color32::WHITE),
+                        RefKind::Local => (is_head.then_some(Icon::Check), synced.then_some(Icon::Cloud), pill_fill, Color32::WHITE),
                     };
-                    let galley = rp.layout_no_wrap(label, FontId::proportional(12.0), fg);
                     let lead_w = if lead.is_some() { PILL_ICON_W } else { 0.0 };
                     let trail_w = if trail.is_some() { PILL_ICON_W + 2.0 } else { 0.0 };
+                    let natural_text = rp.layout_no_wrap(label.clone(), font.clone(), fg).size().x;
+                    let rest = count - n - 1;
+                    // Room for this pill, keeping space for a "+N" badge if others follow.
+                    let reserve = if rest > 0 { badge_w(rest) + 4.0 } else { 0.0 };
+                    let room = right - x - reserve;
+                    let chrome = 14.0 + lead_w + trail_w;
+                    let fits = natural_text + chrome <= room;
+                    if !fits && n > 0 {
+                        // This one (and the rest) go in the "+N" list.
+                        badge = Some((x, count - n));
+                        break;
+                    }
+                    let text_w = if fits { natural_text } else { (room - chrome).max(0.0) };
+                    if text_w < 14.0 && n > 0 {
+                        badge = Some((x, count - n));
+                        break;
+                    }
+                    let mut job = egui::text::LayoutJob::simple_singleline(label, font.clone(), fg);
+                    job.wrap = egui::text::TextWrapping::truncate_at_width(text_w.max(14.0));
+                    let galley = rp.layout_job(job);
                     let text_w = galley.size().x;
-                    let pill = Rect::from_min_size(pos2(x, rect.center().y - 10.0), vec2(text_w + 14.0 + lead_w + trail_w, 20.0));
+                    let pill = Rect::from_min_size(pos2(x, rect.center().y - 10.0), vec2(text_w + chrome, 20.0));
                     rp.rect_filled(pill, CornerRadius::same(6), fill);
                     if r.kind == RefKind::Tag {
                         rp.rect_stroke(pill, CornerRadius::same(6), Stroke::new(1.0, lane_color), StrokeKind::Inside);
@@ -241,10 +352,17 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f
                         pills.push((pill.intersect(cols[0]), i));
                     }
                     x = pill.right() + 4.0;
-                    if x > cols[0].right() - 20.0 && n + 1 < count {
-                        rp.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, format!("+{}", count - n - 1), FontId::proportional(11.0), pal.muted);
+                    if rest > 0 && n + 1 < count && x + badge_w(rest) > right {
+                        badge = Some((x, rest));
                         break;
                     }
+                }
+                if let Some((bx, k)) = badge {
+                    let w = badge_w(k);
+                    let br = Rect::from_min_size(pos2(bx, rect.center().y - 10.0), vec2(w, 20.0));
+                    rp.rect_filled(br, CornerRadius::same(6), deepen(lane_color));
+                    rp.text(br.center(), Align2::CENTER_CENTER, badge_text(k), FontId::proportional(11.5), Color32::WHITE);
+                    badge_list = Some((br.intersect(cols[0]), shown.clone()));
                 }
             }
 
@@ -263,7 +381,7 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f
             avatar(&ap, pos2(cols[3].left() + 20.0, rect.center().y), 10.0, &c.author, &c.email);
             ap.text(pos2(cols[3].left() + 36.0, rect.center().y), Align2::LEFT_CENTER, &c.author, FontId::proportional(12.5), if dim { text_col } else { pal.text2() });
             // Date and id
-            painter.with_clip_rect(cols[4]).text(pos2(cols[4].left() + 10.0, rect.center().y), Align2::LEFT_CENTER, rel_time(c.time), FontId::proportional(12.5), pal.muted);
+            painter.with_clip_rect(cols[4]).text(pos2(cols[4].left() + 10.0, rect.center().y), Align2::LEFT_CENTER, short_date_time(c.time), FontId::proportional(12.5), pal.muted);
             painter.with_clip_rect(cols[5]).text(pos2(cols[5].left() + 10.0, rect.center().y), Align2::LEFT_CENTER, git::short(&c.sha), FontId::monospace(12.0), pal.muted);
 
             let resp = resp.on_hover_text_at_pointer(format!("{}\n{} · {}", c.summary, c.author, abs_time(c.time)));
@@ -283,6 +401,35 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f
                 }
                 let pr = pr.on_hover_text("Double-click to switch to this branch");
                 commit_menu(&pr, tab, &c.sha, Some(i), acts);
+            }
+            if let Some((br, list)) = badge_list {
+                let bresp = ui.interact(br, ui.scope_id().with(("badge", &c.sha)), Sense::click());
+                let sha = c.sha.clone();
+                let lane = deepen(lane_color);
+                bresp.on_hover_ui(|ui| {
+                    crate::util::menu_pad(ui);
+                    ui.set_min_width(220.0);
+                    ui.label(RichText::new("Branches and tags on this commit").size(11.5).weak());
+                    for (i, label, _) in &list {
+                        let r = &tab.snap.refs[*i];
+                        let (icon, fill, fg, tip) = match r.kind {
+                            RefKind::Tag => (Icon::Tag, pal.card, pal.text2(), "Show this commit"),
+                            RefKind::Remote => (Icon::Cloud, lane, Color32::WHITE, "Switch to this branch"),
+                            RefKind::Local => (Icon::Branch, lane, Color32::WHITE, "Switch to this branch"),
+                        };
+                        let b = egui::Button::image_and_text(icons::image(ui.ctx(), icon, 12.0, fg), RichText::new(label).color(fg))
+                            .fill(fill)
+                            .corner_radius(CornerRadius::same(6))
+                            .min_size(vec2(ui.available_width(), 24.0));
+                        if ui.add(b).on_hover_text(tip).clicked() {
+                            acts.push(match r.kind {
+                                RefKind::Remote => Action::CheckoutRemote(r.name.clone()),
+                                RefKind::Local => Action::CheckoutLocal(r.name.clone()),
+                                RefKind::Tag => Action::SelectRef(sha.clone()),
+                            });
+                        }
+                    }
+                });
             }
             commit_menu(&resp, tab, &c.sha, None, acts);
         }
@@ -358,6 +505,7 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f
         }
     });
     tab.graph_hscroll = out.state.clamped_offset().x;
+    tab.graph_offset = out.state.clamped_offset();
 }
 
 fn plural(n: usize) -> &'static str {
@@ -473,14 +621,7 @@ pub fn commit_menu(resp: &egui::Response, tab: &RepoTab, sha: &str, on_ref: Opti
         let target_ref = branch.as_ref().map(|b| b.name.clone()).unwrap_or_else(|| sha.clone());
         let is_current = branch.as_ref().is_some_and(|b| b.kind == RefKind::Local && Some(&b.name) == current.as_ref());
         if !is_head && !is_current {
-            if ui.button(format!("Merge {target_name} into {cur}")).clicked() {
-                acts.push(git_action(format!("Merged {target_name}"), &["merge", "--no-edit", &target_ref]));
-                ui.close();
-            }
-            if ui.button(format!("Rebase {cur} onto {target_name}")).clicked() {
-                acts.push(git_action(format!("Rebased onto {target_name}"), &["rebase", &target_ref]));
-                ui.close();
-            }
+            crate::ui_quick::merge_items(ui, &target_ref, &target_name, &cur, acts);
         }
         if let Some(b) = &branch {
             let local_name = if b.kind == RefKind::Remote { b.name.split_once('/').map(|(_, n)| n.to_string()).unwrap_or(b.name.clone()) } else { b.name.clone() };
@@ -493,13 +634,13 @@ pub fn commit_menu(resp: &egui::Response, tab: &RepoTab, sha: &str, on_ref: Opti
                     acts.push(Action::Dialog(Dialog::RenameBranch { old: b.name.clone(), name: b.name.clone() }));
                     ui.close();
                 }
-                if !is_current && ui.button(format!("Delete {}", b.name)).clicked() {
-                    acts.push(Action::Dialog(Dialog::Confirm {
-                        title: format!("Delete {}?", b.name),
-                        body: "Git refuses if the branch has commits that aren't merged anywhere else.".into(),
-                        confirm: "Delete".into(),
-                        then: Box::new(git_action(format!("Deleted {}", b.name), &["branch", "-d", &b.name])),
-                    }));
+                if !is_current
+                    && ui
+                        .button(format!("Delete {}", b.name))
+                        .on_hover_text("Deleted at once (Undo in the toast); if it has commits no other branch has, they are listed first.")
+                        .clicked()
+                {
+                    acts.push(Action::DeleteBranch(b.name.clone()));
                     ui.close();
                 }
             } else if b.kind == RefKind::Remote {
@@ -589,6 +730,15 @@ pub fn commit_menu(resp: &egui::Response, tab: &RepoTab, sha: &str, on_ref: Opti
             }
         }
     });
+}
+
+/// A deeper, more saturated version of a lane colour for solid labels, so white text on it
+/// stays readable even with light pastel lanes.
+fn deepen(c: Color32) -> Color32 {
+    let mut h = egui::ecolor::Hsva::from(c);
+    h.s = (h.s * 1.2 + 0.12).min(1.0);
+    h.v = (h.v * 0.8).min(0.66);
+    h.into()
 }
 
 /// A 12 px icon in a ref label, its left edge at `x`, centred on `cy`.
