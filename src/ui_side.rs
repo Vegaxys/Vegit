@@ -100,6 +100,7 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
                     }
                     let url = pr.url.clone();
                     resp.context_menu(|ui| {
+                        crate::util::menu_pad(ui);
                         if ui.button("Open in the browser").clicked() {
                             acts.push(Action::OpenUrl(url.clone()));
                             ui.close();
@@ -130,6 +131,7 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
                 }
                 let name = r.name.clone();
                 resp.context_menu(|ui| {
+                    crate::util::menu_pad(ui);
                     if ui.button("Copy name").clicked() {
                         acts.push(Action::Copy(name.clone()));
                         ui.close();
@@ -150,6 +152,7 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
                     .on_hover_text(format!("{}\nRight-click to apply, pop or delete", s.reference));
                 let r = s.reference.clone();
                 resp.context_menu(|ui| {
+                    crate::util::menu_pad(ui);
                     if ui.button("Apply (keep the stash)").clicked() {
                         acts.push(Action::Git { label: "Stash applied".into(), args: vec!["stash".into(), "apply".into(), r.clone()], background: false });
                         ui.close();
@@ -185,6 +188,7 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
                 }
                 let path = sm.clone();
                 resp.context_menu(|ui| {
+                    crate::util::menu_pad(ui);
                     if ui.button("Open in a new tab").clicked() {
                         acts.push(Action::OpenSubmodule(path.clone()));
                         ui.close();
@@ -263,6 +267,7 @@ fn local_item(ui: &mut egui::Ui, tab: &RepoTab, i: usize, leaf: &str, pal: &Pale
     let name = r.name.clone();
     let current = tab.snap.head_branch.clone();
     resp.context_menu(|ui| {
+        crate::util::menu_pad(ui);
         if !is_head && ui.button(format!("Switch to {name}")).clicked() {
             acts.push(Action::CheckoutLocal(name.clone()));
             ui.close();
@@ -324,6 +329,7 @@ fn remote_item(ui: &mut egui::Ui, tab: &RepoTab, i: usize, remote: &str, leaf: &
     let rem = remote.to_string();
     let current = tab.snap.head_branch.clone().unwrap_or_else(|| "current".into());
     resp.context_menu(|ui| {
+        crate::util::menu_pad(ui);
         if ui.button("Switch to it (local branch)").clicked() {
             acts.push(Action::CheckoutRemote(full.clone()));
             ui.close();

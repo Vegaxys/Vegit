@@ -17,6 +17,7 @@ pub enum Icon {
     Folder,
     Refresh,
     Gear,
+    Trash,
 }
 
 pub fn paint(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
@@ -81,6 +82,16 @@ pub fn paint(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             p.line_segment([at(-0.7, -0.5), at(-0.2, 0.0)], s);
             p.line_segment([at(-0.2, 0.0), at(-0.7, 0.5)], s);
             p.line_segment([at(0.0, 0.6), at(0.7, 0.6)], s);
+        }
+        Icon::Trash => {
+            p.line_segment([at(-0.8, -0.55), at(0.8, -0.55)], s);
+            p.line_segment([at(-0.25, -0.55), at(-0.25, -0.8)], s);
+            p.line_segment([at(-0.25, -0.8), at(0.25, -0.8)], s);
+            p.line_segment([at(0.25, -0.8), at(0.25, -0.55)], s);
+            let body = vec![at(-0.6, -0.55), at(-0.5, 0.85), at(0.5, 0.85), at(0.6, -0.55)];
+            p.add(Shape::line(body, s));
+            p.line_segment([at(-0.15, -0.25), at(-0.15, 0.55)], s);
+            p.line_segment([at(0.15, -0.25), at(0.15, 0.55)], s);
         }
         Icon::Gear => {
             for k in 0..8 {

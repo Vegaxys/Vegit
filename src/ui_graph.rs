@@ -52,6 +52,7 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f
             // Author header: click to filter the history by author.
             let resp = ui.interact(col.intersect(hrect), ui.scope_id().with("author_header"), Sense::click()).on_hover_text("Filter by author");
             egui::Popup::menu(&resp).show(|ui| {
+                crate::util::menu_pad(ui);
                 ui.set_min_width(200.0);
                 if ui.selectable_label(author_filter.is_none(), "All authors").clicked() {
                     tab.author_filter = None;
@@ -166,38 +167,73 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f
             if let Some(st) = &c.stash {
                 let galley = rp.layout_no_wrap(format!("⊟ {st}"), FontId::proportional(12.0), pal.text2());
                 let pill = Rect::from_min_size(pos2(x, rect.center().y - 10.0), vec2(galley.size().x + 14.0, 20.0));
-                rp.rect_stroke(pill, CornerRadius::same(10), Stroke::new(1.0, pal.muted), StrokeKind::Inside);
+                rp.rect_stroke(pill, CornerRadius::same(6), Stroke::new(1.0, pal.muted), StrokeKind::Inside);
                 rp.galley(pos2(pill.left() + 7.0, pill.center().y - galley.size().y / 2.0), galley, pal.text2());
             }
             if let Some(idxs) = tab.refs_by_sha.get(&c.sha) {
-                let mut ordered: Vec<usize> = idxs.clone();
-                ordered.sort_by_key(|&i| match tab.snap.refs[i].kind {
-                    RefKind::Local => 0,
-                    RefKind::Remote => 1,
-                    RefKind::Tag => 2,
+                // Each branch name appears once: the local branch when there is one (with a
+                // cloud when its remote copy sits on the same commit), otherwise the remote
+                // one without its "origin/" prefix.
+                let short_of = |name: &str| name.split_once('/').map_or(name.to_string(), |(_, b)| b.to_string());
+                let has_local = |short: &str| tab.snap.refs.iter().any(|r| r.kind == RefKind::Local && r.name == short);
+                let mut shown: Vec<(usize, String, bool)> = Vec::new(); // (ref index, label, synced)
+                for &i in idxs {
+                    let r = &tab.snap.refs[i];
+                    match r.kind {
+                        RefKind::Local => {
+                            let synced = idxs.iter().any(|&j| tab.snap.refs[j].kind == RefKind::Remote && short_of(&tab.snap.refs[j].name) == r.name);
+                            shown.push((i, r.name.clone(), synced));
+                        }
+                        RefKind::Remote => {
+                            let short = short_of(&r.name);
+                            if !has_local(&short) {
+                                shown.push((i, short, false));
+                            }
+                        }
+                        RefKind::Tag => shown.push((i, r.name.clone(), false)),
+                    }
+                }
+                shown.sort_by_key(|(i, _, _)| {
+                    let r = &tab.snap.refs[*i];
+                    let head = r.kind == RefKind::Local && tab.snap.head_branch.as_deref() == Some(r.name.as_str());
+                    match r.kind {
+                        _ if head => 0,
+                        RefKind::Local => 1,
+                        RefKind::Remote => 2,
+                        RefKind::Tag => 3,
+                    }
                 });
-                for (n, &i) in ordered.iter().enumerate() {
+                let count = shown.len();
+                for (n, (i, label, synced)) in shown.into_iter().enumerate() {
                     let r = &tab.snap.refs[i];
                     let is_head = r.kind == RefKind::Local && tab.snap.head_branch.as_deref() == Some(r.name.as_str());
-                    let (icon, fill, fg) = match r.kind {
-                        RefKind::Local if is_head => ("✔ ", lane_color, pal.accent_text),
-                        RefKind::Local => ("", lane_color.gamma_multiply(0.22), pal.text),
-                        RefKind::Remote => ("☁ ", pal.card, pal.text2()),
-                        RefKind::Tag => ("🏷 ", pal.card, pal.text2()),
+                    // Branches: solid pill in the lane colour with white text. Tags stay outlined.
+                    let (text, fill, fg) = match r.kind {
+                        RefKind::Tag => (format!("🏷 {label}"), pal.card, pal.text2()),
+                        RefKind::Remote => (format!("☁ {label}"), lane_color, Color32::WHITE),
+                        RefKind::Local => {
+                            let mut t = if is_head { format!("✔ {label}") } else { label.clone() };
+                            if synced {
+                                t.push_str("  ☁");
+                            }
+                            (t, lane_color, Color32::WHITE)
+                        }
                     };
-                    let galley = rp.layout_no_wrap(format!("{icon}{}", r.name), FontId::proportional(12.0), fg);
+                    let galley = rp.layout_no_wrap(text, FontId::proportional(12.0), fg);
                     let pill = Rect::from_min_size(pos2(x, rect.center().y - 10.0), vec2(galley.size().x + 14.0, 20.0));
-                    rp.rect_filled(pill, CornerRadius::same(10), fill);
-                    if fill == pal.card {
-                        rp.rect_stroke(pill, CornerRadius::same(10), Stroke::new(1.0, lane_color), StrokeKind::Inside);
+                    rp.rect_filled(pill, CornerRadius::same(6), fill);
+                    if r.kind == RefKind::Tag {
+                        rp.rect_stroke(pill, CornerRadius::same(6), Stroke::new(1.0, lane_color), StrokeKind::Inside);
+                    } else if is_head {
+                        rp.rect_stroke(pill, CornerRadius::same(6), Stroke::new(1.5, Color32::WHITE.gamma_multiply(0.7)), StrokeKind::Inside);
                     }
                     rp.galley(pos2(pill.left() + 7.0, pill.center().y - galley.size().y / 2.0), galley, fg);
                     if r.kind != RefKind::Tag {
                         pills.push((pill.intersect(cols[0]), i));
                     }
                     x = pill.right() + 4.0;
-                    if x > cols[0].right() - 20.0 && n + 1 < ordered.len() {
-                        rp.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, format!("+{}", ordered.len() - n - 1), FontId::proportional(11.0), pal.muted);
+                    if x > cols[0].right() - 20.0 && n + 1 < count {
+                        rp.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, format!("+{}", count - n - 1), FontId::proportional(11.0), pal.muted);
                         break;
                     }
                 }
@@ -246,6 +282,14 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f
         // and clipped to its column.
         let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(Rect::from_x_y_ranges(graph_col.x_range(), f32::NEG_INFINITY..=f32::INFINITY)));
         let start = range.start.saturating_sub(1);
+        let stash_colors: Vec<usize> = tab
+            .snap
+            .commits
+            .iter()
+            .zip(&tab.graph.rows)
+            .filter(|(c, _)| c.stash.is_some())
+            .map(|(_, g)| g.color)
+            .collect();
         for row in start..range.end {
             if wip && row == 0 {
                 // Dashed link from the WIP row down to the checked-out commit.
@@ -264,11 +308,11 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, widths: &mut [f
                 continue;
             }
             let g = &tab.graph.rows[row - offset];
-            let to_stash = tab.snap.commits[row - offset].stash.is_some();
             for e in &g.edges {
                 let a = pos2(x_of(e.from_col), y_of(row));
                 let b = pos2(x_of(e.to_col), y_of(row + 1));
-                let color = if to_stash { pal.muted } else { pal.lane(e.color) };
+                // Only the stash's own line is grey; branches passing next to it keep their colour.
+                let color = if stash_colors.contains(&e.color) { pal.muted } else { pal.lane(e.color) };
                 let stroke = Stroke::new(2.0, color);
                 if e.from_col == e.to_col {
                     painter.line_segment([a, b], stroke);
@@ -355,6 +399,7 @@ fn git_action(label: String, args: &[&str]) -> Action {
 pub fn commit_menu(resp: &egui::Response, tab: &RepoTab, sha: &str, on_ref: Option<usize>, acts: &mut Vec<Action>) {
     let commit = tab.commit(sha).cloned();
     resp.context_menu(|ui| {
+        crate::util::menu_pad(ui);
         ui.set_min_width(240.0);
         let sha = sha.to_string();
         let short = git::short(&sha).to_string();
@@ -490,6 +535,7 @@ pub fn commit_menu(resp: &egui::Response, tab: &RepoTab, sha: &str, on_ref: Opti
             ui.close();
         }
         ui.menu_button("Reset current branch to here", |ui| {
+            crate::util::menu_pad(ui);
             if ui.button("Soft: keep all changes staged").clicked() {
                 acts.push(git_action("Reset (soft)".into(), &["reset", "--soft", &sha]));
                 ui.close();

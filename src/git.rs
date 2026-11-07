@@ -81,18 +81,6 @@ impl FileState {
             _ => Self::Modified,
         }
     }
-
-    pub fn letter(self) -> &'static str {
-        match self {
-            Self::Added => "A",
-            Self::Modified => "M",
-            Self::Deleted => "D",
-            Self::Renamed => "R",
-            Self::Untracked => "N",
-            Self::Conflicted => "!",
-            Self::TypeChange => "T",
-        }
-    }
 }
 
 #[derive(Clone, Debug)]

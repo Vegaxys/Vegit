@@ -54,6 +54,8 @@ pub struct Settings {
     pub show_avatars: bool,
     /// Widths of the graph columns: branch/tag, graph, message, author, date, id.
     pub columns: [f32; 6],
+    /// Working-changes lists grouped by kind of change instead of by name.
+    pub sort_by_status: bool,
 }
 
 impl Default for Settings {
@@ -75,6 +77,7 @@ impl Default for Settings {
             show_descriptions: true,
             show_avatars: true,
             columns: [150.0, 100.0, 220.0, 130.0, 90.0, 70.0],
+            sort_by_status: false,
         }
     }
 }
@@ -434,6 +437,7 @@ pub enum Action {
     UnstagePath(String),
     SetRender(bool),
     SetTreeView(bool),
+    SetSortByStatus(bool),
     Redo,
     FileHistory(String),
     FileBlame(String),
@@ -1159,6 +1163,7 @@ impl VegitApp {
                 }
             }
             Action::SetTreeView(on) => self.settings.tree_view = on,
+            Action::SetSortByStatus(on) => self.settings.sort_by_status = on,
             Action::FileHistory(path) | Action::FileBlame(path) if self.tab().is_some_and(|t| t.is_sample()) => {
                 // The sample has no files on disk: show a made-up history.
                 let Some(tab) = self.tab() else { return };
@@ -1758,34 +1763,61 @@ fn open_terminal(dir: &Path) {
     }
 }
 
-fn reveal(path: &Path) {
+/// Git paths use "/", Windows tools want "\\": a mixed path makes Explorer open
+/// "Documents" instead of the file's folder.
+fn native(path: &Path) -> PathBuf {
     #[cfg(windows)]
     {
-        if path.is_file() {
-            let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+        PathBuf::from(path.to_string_lossy().replace('/', "\\"))
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
+}
+
+fn reveal(path: &Path) {
+    let path = native(path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        if path.exists() && !path.is_dir() {
+            // Explorer only understands /select when the path is quoted inside the argument
+            // itself ("/select,\"C:\\a b\\c.txt\""), so pass it raw instead of letting
+            // Rust quote the whole argument.
+            let _ = std::process::Command::new("explorer").raw_arg(format!("/select,\"{}\"", path.display())).spawn();
         } else {
-            let _ = std::process::Command::new("explorer").arg(path).spawn();
+            // Deleted file: open the nearest folder that still exists.
+            let mut dir = path.as_path();
+            while !dir.is_dir() {
+                match dir.parent() {
+                    Some(p) => dir = p,
+                    None => break,
+                }
+            }
+            let _ = std::process::Command::new("explorer").arg(dir).spawn();
         }
     }
     #[cfg(not(windows))]
     {
-        let dir = if path.is_file() { path.parent().unwrap_or(path) } else { path };
+        let dir = if path.is_file() { path.parent().unwrap_or(&path) } else { &path };
         open_with_default(dir);
     }
 }
 
 fn open_with_default(path: &Path) {
+    let path = native(path);
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("explorer").arg(path).spawn();
+        let _ = std::process::Command::new("explorer").arg(&path).spawn();
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open").arg(path).spawn();
+        let _ = std::process::Command::new("open").arg(&path).spawn();
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+        let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
     }
 }
 

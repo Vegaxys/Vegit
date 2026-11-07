@@ -413,12 +413,12 @@ pub fn apply(ctx: &egui::Context, a: &Appearance) {
     let p = Palette::build(a);
     let size = a.text_size.clamp(11.0, 18.0);
     let mut v = if p.dark { egui::Visuals::dark() } else { egui::Visuals::light() };
-    let r = CornerRadius::same(10);
+    let r = CornerRadius::same(6);
     v.panel_fill = p.canvas;
     v.window_fill = p.panel;
     v.window_stroke = Stroke::new(1.0, p.border);
-    v.window_corner_radius = CornerRadius::same(18);
-    v.menu_corner_radius = CornerRadius::same(12);
+    v.window_corner_radius = CornerRadius::same(10);
+    v.menu_corner_radius = CornerRadius::same(8);
     v.extreme_bg_color = p.card;
     v.faint_bg_color = p.row_alt;
     v.code_bg_color = p.card;

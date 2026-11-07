@@ -65,8 +65,40 @@ pub fn state_color(state: FileState, pal: &Palette) -> Color32 {
 /// Height of a file line; fixed so long lists can be virtualised.
 pub const FILE_ROW_H: f32 = 28.0;
 
-/// A clickable file line: status badge, file name, then its folder in a quieter colour.
-/// In tree view `indent` shifts it under its folder and the folder part is left out.
+/// Small coloured mark for a file's change: pencil (modified), plus (new), minus
+/// (deleted), arrow (renamed), exclamation (conflict).
+pub fn status_icon(p: &egui::Painter, c: Pos2, state: FileState, color: Color32) {
+    let s = egui::Stroke::new(1.8, color);
+    match state {
+        FileState::Added | FileState::Untracked => {
+            p.line_segment([c - vec2(5.0, 0.0), c + vec2(5.0, 0.0)], s);
+            p.line_segment([c - vec2(0.0, 5.0), c + vec2(0.0, 5.0)], s);
+        }
+        FileState::Deleted => {
+            p.line_segment([c - vec2(5.0, 0.0), c + vec2(5.0, 0.0)], s);
+        }
+        FileState::Renamed | FileState::TypeChange => {
+            p.line_segment([c - vec2(5.0, 0.0), c + vec2(5.0, 0.0)], s);
+            p.line_segment([c + vec2(5.0, 0.0), c + vec2(1.5, -3.5)], s);
+            p.line_segment([c + vec2(5.0, 0.0), c + vec2(1.5, 3.5)], s);
+        }
+        FileState::Conflicted => {
+            p.line_segment([c - vec2(0.0, 5.5), c + vec2(0.0, 2.0)], s);
+            p.circle_filled(c + vec2(0.0, 5.0), 1.2, color);
+        }
+        FileState::Modified => {
+            // A small pencil: body, then the tip.
+            let a = c + vec2(4.5, -4.5);
+            let b = c + vec2(-2.5, 2.5);
+            p.line_segment([a, b], egui::Stroke::new(3.0, color));
+            p.add(egui::Shape::convex_polygon(vec![b + vec2(-1.5, -1.5), b + vec2(1.5, 1.5), c + vec2(-5.0, 5.0)], color, egui::Stroke::NONE));
+        }
+    }
+}
+
+/// A clickable file line: change mark, then the path with its folder in a quieter colour
+/// and the file name in full colour. In tree view `indent` shifts it under its folder and
+/// only the name is shown.
 pub fn file_row(ui: &mut egui::Ui, f: &FileChange, pal: &Palette, selected: bool, button: Option<&str>, indent: f32) -> (egui::Response, bool) {
     let (full, resp) = ui.allocate_exact_size(vec2(ui.available_width(), FILE_ROW_H), Sense::click());
     let p = ui.painter_at(full);
@@ -74,26 +106,26 @@ pub fn file_row(ui: &mut egui::Ui, f: &FileChange, pal: &Palette, selected: bool
     // Pointer anywhere on the row, including over its button (which takes the hover itself).
     let hovered = ui.rect_contains_pointer(full);
     if selected {
-        p.rect_filled(rect.shrink2(vec2(0.0, 1.0)), CornerRadius::same(9), pal.selected);
+        p.rect_filled(rect.shrink2(vec2(0.0, 1.0)), CornerRadius::same(5), pal.selected);
     } else if hovered {
-        p.rect_filled(rect.shrink2(vec2(0.0, 1.0)), CornerRadius::same(9), pal.hover);
+        p.rect_filled(rect.shrink2(vec2(0.0, 1.0)), CornerRadius::same(5), pal.hover);
     }
-    let color = state_color(f.state, pal);
-    let badge = egui::Rect::from_center_size(pos2(rect.left() + 14.0, rect.center().y), vec2(18.0, 18.0));
-    p.rect_filled(badge, CornerRadius::same(5), color.gamma_multiply(0.2));
-    p.text(badge.center(), Align2::CENTER_CENTER, f.state.letter(), FontId::proportional(11.0), color);
+    status_icon(&p, pos2(rect.left() + 14.0, rect.center().y), f.state, state_color(f.state, pal));
 
     let (dir, name) = match f.path.rfind('/') {
         Some(i) => (&f.path[..=i], &f.path[i + 1..]),
         None => ("", f.path.as_str()),
     };
-    let name_g = p.layout_no_wrap(name.to_string(), FontId::proportional(13.0), pal.text);
-    let name_w = name_g.size().x;
-    let text_y = rect.center().y - name_g.size().y / 2.0;
-    p.galley(pos2(rect.left() + 30.0, text_y), name_g, pal.text);
+    let font = FontId::proportional(13.0);
+    let mut x = rect.left() + 30.0;
     if !dir.is_empty() && indent == 0.0 {
-        p.text(pos2(rect.left() + 36.0 + name_w, rect.center().y), Align2::LEFT_CENTER, dir.trim_end_matches('/'), FontId::proportional(11.5), pal.muted);
+        let dir_g = p.layout_no_wrap(dir.to_string(), font.clone(), pal.muted);
+        let w = dir_g.size().x;
+        p.galley(pos2(x, rect.center().y - dir_g.size().y / 2.0), dir_g, pal.muted);
+        x += w;
     }
+    let name_g = p.layout_no_wrap(name.to_string(), font, pal.text);
+    p.galley(pos2(x, rect.center().y - name_g.size().y / 2.0), name_g, pal.text);
 
     let clicked_button = match button {
         Some(label) if hovered => hover_pill(ui, full, label, pal, resp.id.with("pill")),
@@ -122,20 +154,20 @@ pub fn hover_pill(ui: &mut egui::Ui, row: egui::Rect, label: &str, pal: &Palette
 pub fn card(pal: &Palette) -> egui::Frame {
     egui::Frame::new()
         .fill(pal.card)
-        .corner_radius(CornerRadius::same(16))
-        .inner_margin(egui::Margin::same(14))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::same(10))
 }
 
 /// Gap between bento tiles, in points.
-pub const GAP: i8 = 8;
+pub const GAP: i8 = 4;
 
 /// One bento tile: a big rounded block standing on the canvas.
 pub fn tile(pal: &Palette) -> egui::Frame {
     egui::Frame::new()
         .fill(pal.panel)
         .stroke(egui::Stroke::new(1.0, pal.border))
-        .corner_radius(CornerRadius::same(20))
-        .inner_margin(egui::Margin::same(14))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(8))
 }
 
 /// Draws a tile that fills all the space it is given.
@@ -152,7 +184,7 @@ pub fn fill_tile<R>(ui: &mut egui::Ui, pal: &Palette, add: impl FnOnce(&mut egui
 pub fn accent_button(text: impl Into<String>, pal: &Palette) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text.into()).color(pal.accent_text).strong())
         .fill(pal.accent)
-        .corner_radius(CornerRadius::same(12))
+        .corner_radius(CornerRadius::same(8))
 }
 
 /// Two or more choices shown as one pill with the active part filled.
@@ -180,6 +212,13 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, pal: &Palette, value: &
         });
     });
     changed
+}
+
+/// Gives menu entries room on the left: egui's menu style squeezes button padding to 2 px,
+/// so the hover highlight touched the text. Call it first in every menu.
+pub fn menu_pad(ui: &mut egui::Ui) {
+    ui.spacing_mut().button_padding = vec2(12.0, 5.0);
+    ui.spacing_mut().item_spacing.y = 2.0;
 }
 
 pub fn section_title(ui: &mut egui::Ui, text: &str, pal: &Palette) {

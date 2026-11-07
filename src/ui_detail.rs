@@ -13,13 +13,13 @@ use crate::git::{self, DiffSource, FileChange, FileState};
 use crate::theme::Palette;
 use crate::util::{FILE_ROW_H, abs_time, accent_button, avatar, card, file_row, rel_time, section_title, segmented};
 
-pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, acts: &mut Vec<Action>) {
+pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, sort_by_status: bool, acts: &mut Vec<Action>) {
     if tab.loading {
         loading(ui, "Reading the repository…");
         return;
     }
     match tab.selection.clone() {
-        Selection::Wip => wip(ui, tab, pal, tree, acts),
+        Selection::Wip => wip(ui, tab, pal, tree, sort_by_status, acts),
         Selection::Commit(sha) => commit(ui, tab, &sha, pal, tree, acts),
     }
 }
@@ -57,7 +57,7 @@ impl Side {
 
 const SECTION_HEAD_H: f32 = 30.0;
 
-fn wip(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, acts: &mut Vec<Action>) {
+fn wip(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, sort_by_status: bool, acts: &mut Vec<Action>) {
     // Composer pinned to the bottom so the file lists can take the rest. No box around it:
     // a thin line is enough to separate it from the lists.
     egui::Panel::bottom("composer")
@@ -67,28 +67,74 @@ fn wip(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, acts: &m
         .show(ui, |ui| composer(ui, tab, pal, acts));
 
     egui::Panel::top("wip_top")
-        .frame(egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 0, top: 0, bottom: 4 }))
+        .frame(egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 0, top: 0, bottom: 2 }))
         .resizable(false)
         .show_separator_line(false)
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let n = tab.snap.status.unstaged.len() + tab.snap.status.staged.len();
-                ui.label(RichText::new(format!("{n} file change{}", if n == 1 { "" } else { "s" })).strong().size(15.0));
-                if let Some(b) = &tab.snap.head_branch {
-                    ui.label(RichText::new("on").color(pal.text2()));
-                    // Branch in a pill; a long name ends with "…" instead of pushing things out.
-                    let max_w = (ui.available_width() - 120.0).max(40.0);
-                    egui::Frame::new()
-                        .fill(pal.accent.gamma_multiply(0.2))
-                        .corner_radius(CornerRadius::same(10))
-                        .inner_margin(egui::Margin::symmetric(8, 2))
-                        .show(ui, |ui| {
-                            ui.set_max_width(max_w);
-                            ui.add(egui::Label::new(RichText::new(b).color(pal.accent)).truncate()).on_hover_text(b);
-                        });
+            let n = tab.snap.status.unstaged.len() + tab.snap.status.staged.len();
+            let row_w = ui.available_width();
+            // Row 1: discard everything on the left, the title centred.
+            let (row, _) = ui.allocate_exact_size(vec2(row_w, 30.0), Sense::hover());
+            let trash = Rect::from_min_size(pos2(row.left(), row.center().y - 13.0), vec2(26.0, 26.0));
+            let can_discard = !tab.snap.status.unstaged.is_empty();
+            let tr = ui.interact(trash, ui.scope_id().with("discard_all"), if can_discard { Sense::click() } else { Sense::hover() });
+            {
+                let p = ui.painter();
+                let col = if can_discard { pal.removed } else { pal.muted.gamma_multiply(0.5) };
+                if tr.hovered() && can_discard {
+                    p.rect_filled(trash, CornerRadius::same(5), pal.removed.gamma_multiply(0.18));
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| view_switch(ui, pal, tree, acts));
-            });
+                p.rect_stroke(trash, CornerRadius::same(5), Stroke::new(1.0, col), egui::StrokeKind::Inside);
+                crate::icons::paint(p, trash.shrink(6.0), crate::icons::Icon::Trash, col);
+            }
+            if tr.on_hover_text("Discard all unstaged changes").clicked() && can_discard {
+                acts.push(Action::Dialog(Dialog::Confirm {
+                    title: "Discard all changes?".into(),
+                    body: format!("Every unstaged change ({} file(s)) will be lost, including new files. This can't be undone.", tab.snap.status.unstaged.len()),
+                    confirm: "Discard all".into(),
+                    then: Box::new(Action::DiscardMany(tab.snap.status.unstaged.clone())),
+                }));
+            }
+            // Title: "15 file changes on [branch]", centred, the branch pill cut with "…".
+            let font = egui::FontId::proportional(14.5);
+            let lead = format!("{n} file change{} on ", if n == 1 { "" } else { "s" });
+            let p = ui.painter();
+            let lead_g = p.layout_no_wrap(lead, font.clone(), pal.text);
+            let branch = tab.snap.head_branch.clone().unwrap_or_else(|| "detached HEAD".into());
+            let max_pill = (row_w - 2.0 * 34.0 - lead_g.size().x - 16.0).max(40.0);
+            let pill_g = p.layout(branch.clone(), egui::FontId::proportional(13.0), Color32::WHITE, f32::INFINITY);
+            let pill_text_w = pill_g.size().x.min(max_pill);
+            let total = lead_g.size().x + pill_text_w + 14.0;
+            let x0 = row.center().x - total / 2.0;
+            let lead_w = lead_g.size().x;
+            p.galley(pos2(x0, row.center().y - lead_g.size().y / 2.0), lead_g, pal.text);
+            let pill = Rect::from_min_size(pos2(x0 + lead_w, row.center().y - 10.0), vec2(pill_text_w + 14.0, 20.0));
+            p.rect_filled(pill, CornerRadius::same(5), pal.accent);
+            let mut job = egui::text::LayoutJob::simple_singleline(branch.clone(), egui::FontId::proportional(13.0), pal.accent_text);
+            job.wrap = egui::text::TextWrapping::truncate_at_width(pill_text_w);
+            let g = ui.painter().layout_job(job);
+            ui.painter().galley(pos2(pill.left() + 7.0, pill.center().y - g.size().y / 2.0), g, pal.accent_text);
+            ui.interact(pill, ui.scope_id().with("branch_pill"), Sense::hover()).on_hover_text(branch);
+
+            // Row 2: sort order on the left, Path / Tree centred.
+            let (row2, _) = ui.allocate_exact_size(vec2(row_w, 30.0), Sense::hover());
+            let sort_r = Rect::from_min_size(pos2(row2.left(), row2.center().y - 12.0), vec2(40.0, 24.0));
+            let sr = ui.interact(sort_r, ui.scope_id().with("sort_files"), Sense::click());
+            {
+                let p = ui.painter();
+                if sr.hovered() {
+                    p.rect_filled(sort_r, CornerRadius::same(5), pal.hover);
+                }
+                let label = if sort_by_status { "± ↓" } else { "A-Z" };
+                p.text(sort_r.center(), Align2::CENTER_CENTER, label, egui::FontId::proportional(12.0), pal.text2());
+            }
+            let tip = if sort_by_status { "Sorted by kind of change (click: by name)" } else { "Sorted by name (click: by kind of change)" };
+            if sr.on_hover_text(tip).clicked() {
+                acts.push(Action::SetSortByStatus(!sort_by_status));
+            }
+            let switch_w = 130.0;
+            let sw = Rect::from_center_size(row2.center(), vec2(switch_w, 26.0));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(sw).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| view_switch(ui, pal, tree, acts));
         });
 
     // Two lists, each with its own scrollbar, split by a line that can be dragged. Each list
@@ -112,7 +158,7 @@ fn wip(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, acts: &m
     };
     let w = ui.available_width();
 
-    ui.allocate_ui(vec2(w, top_h), |ui| file_section(ui, tab, pal, tree, Side::Unstaged, top_h, acts));
+    ui.allocate_ui(vec2(w, top_h), |ui| file_section(ui, tab, pal, tree, sort_by_status, Side::Unstaged, top_h, acts));
 
     let (div, resp) = ui.allocate_exact_size(vec2(w, DIVIDER_H), Sense::click_and_drag());
     let can_drag = tab.folded == [false, false];
@@ -134,12 +180,12 @@ fn wip(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, acts: &m
     let resp = if can_drag { resp.on_hover_text("Drag to share the room between the two lists; double-click to reset") } else { resp };
     let _ = resp;
 
-    ui.allocate_ui(vec2(w, bottom_h), |ui| file_section(ui, tab, pal, tree, Side::Staged, bottom_h, acts));
+    ui.allocate_ui(vec2(w, bottom_h), |ui| file_section(ui, tab, pal, tree, sort_by_status, Side::Staged, bottom_h, acts));
 }
 
 /// One of the two lists: a fixed header (title, count, stage/unstage all), then its own
 /// scrolling list below it, so the scrollbar never covers the header button.
-fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, side: Side, height: f32, acts: &mut Vec<Action>) {
+fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, sort_by_status: bool, side: Side, height: f32, acts: &mut Vec<Action>) {
     ui.set_min_height(height);
     let list = side.list();
     let files: &[FileChange] = match side {
@@ -147,9 +193,16 @@ fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool,
         Side::Staged => &tab.snap.status.staged,
     };
     ui.allocate_ui_with_layout(vec2(ui.available_width(), SECTION_HEAD_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        let (title, button, action) = match side {
-            Side::Unstaged => ("Unstaged files", "Stage all", Action::StageAll),
-            Side::Staged => ("Staged files", "Unstage all", Action::UnstageAll),
+        let (title, button, action, tone) = match side {
+            Side::Unstaged => ("Unstaged Files", "Stage All Changes", Action::StageAll, pal.added),
+            Side::Staged => ("Staged Files", "Unstage All Changes", Action::UnstageAll, pal.removed),
+        };
+        // Outlined in green (stage) or red (unstage), like the reference.
+        let section_button = |text: &str| {
+            egui::Button::new(RichText::new(text).size(12.0).color(tone))
+                .fill(tone.gamma_multiply(0.12))
+                .stroke(Stroke::new(1.0, tone.gamma_multiply(0.8)))
+                .corner_radius(CornerRadius::same(4))
         };
         // Chevron and title fold the list.
         let folded = tab.folded[list as usize];
@@ -163,15 +216,13 @@ fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool,
             ui.painter().line_segment([c + vec2(-4.0, -2.0), c + vec2(0.0, 2.0)], s);
             ui.painter().line_segment([c + vec2(0.0, 2.0), c + vec2(4.0, -2.0)], s);
         }
-        let tresp = ui.add(egui::Label::new(RichText::new(title).strong().color(pal.text)).sense(Sense::click()));
-        ui.label(RichText::new(files.len().to_string()).color(pal.muted));
+        let tresp = ui.add(egui::Label::new(RichText::new(format!("{title} ({})", files.len())).size(14.0).color(pal.text)).sense(Sense::click()));
         if cresp.clicked() || tresp.clicked() {
             tab.folded[list as usize] = !folded;
         }
         if folded {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let b = egui::Button::new(RichText::new(button).size(12.0)).corner_radius(CornerRadius::same(10));
-                if ui.add_enabled(!files.is_empty(), b).clicked() {
+                if ui.add_enabled(!files.is_empty(), section_button(button)).clicked() {
                     acts.push(action.clone());
                 }
             });
@@ -185,8 +236,7 @@ fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool,
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let b = egui::Button::new(RichText::new(button).size(12.0)).corner_radius(CornerRadius::same(10));
-            if ui.add_enabled(!files.is_empty(), b).clicked() {
+            if ui.add_enabled(!files.is_empty(), section_button(button)).clicked() {
                 acts.push(action);
             }
         });
@@ -194,6 +244,10 @@ fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool,
     if tab.folded[list as usize] {
         return;
     }
+    // Thin line under the header, then the list.
+    let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter().rect_filled(line, CornerRadius::ZERO, pal.border);
+    ui.add_space(4.0);
     if files.is_empty() {
         let text = match side {
             Side::Unstaged => "Nothing to stage: the folder matches the last commit.",
@@ -203,7 +257,20 @@ fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool,
         return;
     }
 
-    let entries = filelist::flatten(files, tree, &tab.collapsed[list as usize]);
+    let mut entries = filelist::flatten(files, tree, &tab.collapsed[list as usize]);
+    if sort_by_status && !tree {
+        let rank = |st: FileState| match st {
+            FileState::Conflicted => 0,
+            FileState::Modified | FileState::TypeChange => 1,
+            FileState::Renamed => 2,
+            FileState::Added | FileState::Untracked => 3,
+            FileState::Deleted => 4,
+        };
+        entries.sort_by_cached_key(|e| match e {
+            Entry::File { idx, .. } => (rank(files[*idx].state), files[*idx].path.to_lowercase()),
+            Entry::Folder { path, .. } => (9, path.to_lowercase()),
+        });
+    }
     let source = match side {
         Side::Unstaged => DiffSource::Unstaged,
         Side::Staged => DiffSource::Staged,
@@ -231,6 +298,7 @@ fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool,
                     }
                     let p = path.to_string();
                     resp.context_menu(|ui| {
+                        crate::util::menu_pad(ui);
                         if ui.button(if side == Side::Staged { "Unstage folder" } else { "Stage folder" }).clicked() {
                             acts.push(if side == Side::Staged { Action::UnstagePath(p.clone()) } else { Action::StagePath(p.clone()) });
                             ui.close();
@@ -314,6 +382,7 @@ fn file_menu(resp: &egui::Response, group: &[FileChange], side: Option<Side>, pa
     let one = files.len() == 1;
     let what = if one { "file".to_string() } else { format!("{} files", files.len()) };
     resp.context_menu(|ui| {
+        crate::util::menu_pad(ui);
         match side {
             Some(Side::Unstaged) => {
                 if ui.button(format!("Stage {what}")).clicked() {
@@ -394,8 +463,28 @@ fn file_menu(resp: &egui::Response, group: &[FileChange], side: Option<Side>, pa
 }
 
 fn composer(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<Action>) {
-    let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
-    ui.painter().rect_filled(line, CornerRadius::ZERO, pal.border);
+    // Tab row: "Commit" (active) and a stash shortcut, over a line.
+    let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
+    let commit_tab = Rect::from_min_size(bar.min, vec2(104.0, bar.height()));
+    {
+        let p = ui.painter();
+        p.rect_filled(commit_tab, CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, pal.card);
+        let c = pos2(commit_tab.left() + 18.0, commit_tab.center().y);
+        p.circle_stroke(c, 4.0, Stroke::new(1.6, pal.text));
+        p.line_segment([c - vec2(9.0, 0.0), c - vec2(4.0, 0.0)], Stroke::new(1.6, pal.text));
+        p.line_segment([c + vec2(4.0, 0.0), c + vec2(9.0, 0.0)], Stroke::new(1.6, pal.text));
+        p.text(pos2(commit_tab.left() + 34.0, commit_tab.center().y), Align2::LEFT_CENTER, "Commit", egui::FontId::proportional(14.0), pal.text);
+        p.rect_filled(Rect::from_min_size(pos2(bar.left(), bar.bottom() - 1.0), vec2(bar.width(), 1.0)), CornerRadius::ZERO, pal.border);
+    }
+    let stash_r = Rect::from_min_size(pos2(commit_tab.right() + 6.0, bar.top() + 3.0), vec2(30.0, bar.height() - 6.0));
+    let sr = ui.interact(stash_r, ui.scope_id().with("composer_stash"), Sense::click());
+    if sr.hovered() {
+        ui.painter().rect_filled(stash_r, CornerRadius::same(5), pal.hover);
+    }
+    crate::icons::paint(ui.painter(), stash_r.shrink2(vec2(7.0, 6.0)), crate::icons::Icon::Stash, pal.text2());
+    if sr.on_hover_text("Stash these changes").clicked() && !tab.snap.status.is_clean() {
+        acts.push(Action::Dialog(Dialog::Stash { message: String::new(), include_untracked: true }));
+    }
     ui.add_space(6.0);
     ui.checkbox(&mut tab.amend, RichText::new("Amend previous commit").color(pal.text2()));
 
@@ -403,7 +492,7 @@ fn composer(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
     egui::Frame::new()
         .fill(pal.canvas)
         .stroke(Stroke::new(1.0, pal.border))
-        .corner_radius(CornerRadius::same(12))
+        .corner_radius(CornerRadius::same(6))
         .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -451,7 +540,7 @@ fn composer(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
     let enabled = tab.amend || (n > 0 && has_msg);
     let commit = egui::Button::new(RichText::new(label).color(pal.accent_text).strong())
         .fill(pal.accent)
-        .corner_radius(CornerRadius { nw: 12, sw: 12, ne: 4, se: 4 });
+        .corner_radius(CornerRadius { nw: 6, sw: 6, ne: 2, se: 2 });
     let resp = ui.put(left_r, |ui: &mut egui::Ui| ui.add_enabled(enabled, commit));
     if resp.on_hover_text("Commit the staged files (Ctrl+Enter)").clicked() {
         acts.push(Action::Commit);
@@ -462,7 +551,7 @@ fn composer(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
 
     let stage = egui::Button::new(RichText::new(format!("Stage all ({unstaged})")).color(pal.text))
         .fill(pal.card)
-        .corner_radius(CornerRadius { nw: 4, sw: 4, ne: 12, se: 12 });
+        .corner_radius(CornerRadius { nw: 2, sw: 2, ne: 6, se: 6 });
     let resp = ui.put(right_r, |ui: &mut egui::Ui| ui.add_enabled(unstaged > 0, stage));
     if resp.on_hover_text("Stage every unstaged change").clicked() {
         acts.push(Action::StageAll);
@@ -490,6 +579,7 @@ fn commit(ui: &mut egui::Ui, tab: &mut RepoTab, sha: &str, pal: &Palette, tree: 
                     .add(egui::Label::new(RichText::new(format!("commit {}  ▾", git::short(sha))).monospace().color(pal.muted)).sense(Sense::click()))
                     .on_hover_text("Click to copy");
                 egui::Popup::menu(&title).show(|ui| {
+                    crate::util::menu_pad(ui);
                     if ui.button(format!("Copy SHA  ({}…)", &sha[..sha.len().min(12)])).clicked() {
                         acts.push(Action::Copy(sha.to_string()));
                         ui.close();
@@ -951,7 +1041,7 @@ fn image_view(ui: &mut egui::Ui, images: &ImageState, file: &FileChange, pal: &P
         for (label, side, color) in sides {
             let (rect, _) = ui.allocate_exact_size(vec2(col_w, avail.y), Sense::hover());
             let p = ui.painter_at(rect);
-            p.rect_filled(rect, CornerRadius::same(16), pal.card);
+            p.rect_filled(rect, CornerRadius::same(8), pal.card);
             p.text(rect.left_top() + vec2(14.0, 16.0), Align2::LEFT_CENTER, label, FontId::proportional(13.0), color);
             let area = Rect::from_min_max(rect.left_top() + vec2(14.0, 34.0), rect.right_bottom() - vec2(14.0, 34.0));
             match side {

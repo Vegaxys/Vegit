@@ -37,7 +37,7 @@ impl eframe::App for VegitApp {
         }
 
         egui::Panel::top("tabs")
-            .frame(egui::Frame::new().fill(pal.canvas).inner_margin(egui::Margin { left: 14, right: 14, top: 8, bottom: 6 }))
+            .frame(egui::Frame::new().fill(pal.canvas).inner_margin(egui::Margin { left: 8, right: 8, top: 6, bottom: 4 }))
             .show_separator_line(false)
             .show(ui, |ui| self.tab_strip(ui, &pal));
 
@@ -133,7 +133,7 @@ impl VegitApp {
                 egui::Frame::new()
                     .fill(fill)
                     .stroke(stroke)
-                    .corner_radius(CornerRadius::same(14))
+                    .corner_radius(CornerRadius::same(8))
                     .inner_margin(egui::Margin::symmetric(10, 3))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -150,14 +150,14 @@ impl VegitApp {
                         });
                     });
             }
-            if ui.add(egui::Button::new(RichText::new("+").strong()).corner_radius(CornerRadius::same(14))).on_hover_text("Open, clone or create a repository").clicked() {
+            if ui.add(egui::Button::new(RichText::new("+").strong()).corner_radius(CornerRadius::same(8))).on_hover_text("Open, clone or create a repository").clicked() {
                 self.actions.push(Action::ShowHome);
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 window_buttons(ui, pal);
                 ui.add_space(6.0);
-                let access_btn = egui::Button::new(RichText::new("🔑  Access")).corner_radius(CornerRadius::same(14));
+                let access_btn = egui::Button::new(RichText::new("🔑  Access")).corner_radius(CornerRadius::same(8));
                 if ui.add(access_btn).on_hover_text("Sign in to reach private repositories").clicked() {
                     self.actions.push(Action::Dialog(Dialog::Access(AccessForm { host: "github.com".into(), ..Default::default() })));
                 }
@@ -177,6 +177,7 @@ impl VegitApp {
     fn theme_menu(&mut self, ui: &mut egui::Ui, pal: &Palette) {
         let current = self.settings.theme;
         ui.menu_button(RichText::new(format!("🎨  {}", current.label())), |ui| {
+            crate::util::menu_pad(ui);
             ui.set_min_width(330.0);
             ui.label(RichText::new("Theme preset").weak());
             // Whole rows are clickable, not just the name.
@@ -201,16 +202,17 @@ impl VegitApp {
         let tree = self.settings.tree_view;
         let diff_mode = self.settings.diff_mode;
         let show_desc = self.settings.show_descriptions;
+        let sort_by_status = self.settings.sort_by_status;
         let columns = &mut self.settings.columns;
         let tab = &mut self.tabs[active];
         let g = GAP;
 
         egui::Panel::top("header")
-            .frame(egui::Frame::new().fill(pal.canvas).inner_margin(egui::Margin { left: g * 2, right: g * 2, top: 2, bottom: g }))
+            .frame(egui::Frame::new().fill(pal.canvas).inner_margin(egui::Margin { left: g * 2, right: g * 2, top: 0, bottom: g }))
             .show_separator_line(false)
             .show(ui, |ui| {
                 // One slim tile for the whole header: repository, actions, sync, changes, search.
-                tile(pal).inner_margin(egui::Margin::symmetric(14, 3)).show(ui, |ui| {
+                tile(pal).inner_margin(egui::Margin::symmetric(10, 2)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
                         ui.set_min_height(HEADER_H);
@@ -220,6 +222,9 @@ impl VegitApp {
                         });
                         let locals: Vec<String> = tab.snap.refs.iter().filter(|r| r.kind == RefKind::Local).map(|r| r.name.clone()).collect();
                         ui.menu_button(RichText::new(format!("⎇  {branch}")).color(pal.accent), |ui| {
+                            crate::util::menu_pad(ui);
+                            // Room to breathe even with short branch names.
+                            ui.set_min_width(240.0);
                             ui.label(RichText::new("Switch branch").weak());
                             egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                                 for b in &locals {
@@ -261,6 +266,7 @@ impl VegitApp {
                             acts.push(Action::Pull(PullMode::FastForwardIfPossible));
                         }
                         pull.context_menu(|ui| {
+                            crate::util::menu_pad(ui);
                             for (text, mode) in [
                                 ("Fast-forward if possible", PullMode::FastForwardIfPossible),
                                 ("Fast-forward only", PullMode::FastForwardOnly),
@@ -277,6 +283,7 @@ impl VegitApp {
                             acts.push(Action::Push { force: false });
                         }
                         push.context_menu(|ui| {
+                            crate::util::menu_pad(ui);
                             if ui.button("Force push (safely, with lease)").clicked() {
                                 acts.push(Action::Dialog(Dialog::Confirm {
                                     title: "Force push?".into(),
@@ -340,7 +347,7 @@ impl VegitApp {
                     egui::Frame::new()
                         .fill(pal.warn.gamma_multiply(0.18))
                         .stroke(Stroke::new(1.0, pal.warn))
-                        .corner_radius(CornerRadius::same(16))
+                        .corner_radius(CornerRadius::same(8))
                         .inner_margin(egui::Margin::symmetric(14, 8))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -365,7 +372,7 @@ impl VegitApp {
             });
 
         egui::Panel::bottom("statusbar")
-            .frame(egui::Frame::new().fill(pal.canvas).inner_margin(egui::Margin { left: 18, right: 18, top: 0, bottom: 6 }))
+            .frame(egui::Frame::new().fill(pal.canvas).inner_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 4 }))
             .show_separator_line(false)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -399,7 +406,7 @@ impl VegitApp {
             .size_range(290.0..=660.0)
             .show_separator_line(false)
             .frame(side_frame(0, g * 2))
-            .show(ui, |ui| fill_tile(ui, pal, |ui| ui_detail::show(ui, tab, pal, tree, &mut acts)));
+            .show(ui, |ui| fill_tile(ui, pal, |ui| ui_detail::show(ui, tab, pal, tree, sort_by_status, &mut acts)));
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(pal.canvas).inner_margin(egui::Margin { left: g, right: g, top: 0, bottom: g }))
@@ -538,7 +545,7 @@ impl VegitApp {
         let mut keep = true;
         let mut acts = Vec::new();
         let modal = egui::Modal::new(egui::Id::unique("dialog"))
-            .frame(egui::Frame::new().fill(pal.panel).stroke(Stroke::new(1.0, pal.border)).corner_radius(CornerRadius::same(22)).inner_margin(egui::Margin::same(20)))
+            .frame(egui::Frame::new().fill(pal.panel).stroke(Stroke::new(1.0, pal.border)).corner_radius(CornerRadius::same(12)).inner_margin(egui::Margin::same(18)))
             .show(ctx, |ui| {
                 ui.set_width(match dialog {
                     Dialog::NewPullRequest(_) => 620.0,
@@ -660,7 +667,7 @@ impl VegitApp {
                     let resp = egui::Frame::new()
                         .fill(pal.card)
                         .stroke(Stroke::new(1.0, color.gamma_multiply(0.6)))
-                        .corner_radius(CornerRadius::same(16))
+                        .corner_radius(CornerRadius::same(8))
                         .inner_margin(egui::Margin { left: 16, right: 14, top: 10, bottom: 10 })
                         .shadow(egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(70) })
                         .show(ui, |ui| {
@@ -756,6 +763,7 @@ fn pr_dialog(ui: &mut egui::Ui, form: &mut PrForm, pal: &Palette, acts: &mut Vec
         let from_text = remote_label(form, form.from);
         let mut changed_from = false;
         egui::ComboBox::from_id_salt("pr_from_repo").width(col_w).selected_text(from_text).show_ui(ui, |ui| {
+            crate::util::menu_pad(ui);
             for &i in &of_forge {
                 let label = remote_label(form, i);
                 changed_from |= ui.selectable_value(&mut form.from, i, label).changed();
@@ -765,6 +773,7 @@ fn pr_dialog(ui: &mut egui::Ui, form: &mut PrForm, pal: &Palette, acts: &mut Vec
         let to_text = remote_label(form, form.to);
         let mut changed_to = false;
         egui::ComboBox::from_id_salt("pr_to_repo").width(col_w).selected_text(to_text).show_ui(ui, |ui| {
+            crate::util::menu_pad(ui);
             for &i in &of_forge {
                 let label = remote_label(form, i);
                 changed_to |= ui.selectable_value(&mut form.to, i, label).changed();
@@ -789,6 +798,7 @@ fn pr_dialog(ui: &mut egui::Ui, form: &mut PrForm, pal: &Palette, acts: &mut Vec
         }
         let from_sel = if form.from_branch.is_empty() { "Select…".to_string() } else { form.from_branch.clone() };
         egui::ComboBox::from_id_salt("pr_from_branch").width(col_w).selected_text(from_sel).show_ui(ui, |ui| {
+            crate::util::menu_pad(ui);
             egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
                 for b in &from_branches {
                     ui.selectable_value(&mut form.from_branch, b.clone(), b);
@@ -799,6 +809,7 @@ fn pr_dialog(ui: &mut egui::Ui, form: &mut PrForm, pal: &Palette, acts: &mut Vec
         let to_branches: Vec<String> = form.branches_of(form.to).iter().map(|s| s.to_string()).collect();
         let to_sel = if form.to_branch.is_empty() { "Select…".to_string() } else { form.to_branch.clone() };
         egui::ComboBox::from_id_salt("pr_to_branch").width(col_w).selected_text(to_sel).show_ui(ui, |ui| {
+            crate::util::menu_pad(ui);
             egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
                 for b in &to_branches {
                     ui.selectable_value(&mut form.to_branch, b.clone(), b);
@@ -887,6 +898,7 @@ fn font_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<String>, preset_la
         }),
     };
     egui::ComboBox::from_id_salt(id).width(260.0).selected_text(shown).show_ui(ui, |ui| {
+        crate::util::menu_pad(ui);
         if ui.selectable_label(value.is_none(), format!("Preset ({preset_label})")).clicked() {
             *value = None;
         }
@@ -965,6 +977,7 @@ fn settings_dialog(ui: &mut egui::Ui, s: &mut Settings, pal: &Palette) {
                 ui.label(RichText::new("Branch colours").color(pal.text2()));
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_id_salt("lane_mode").width(200.0).selected_text(s.lane_mode.label()).show_ui(ui, |ui| {
+                        crate::util::menu_pad(ui);
                         for m in LaneMode::ALL {
                             ui.selectable_value(&mut s.lane_mode, m, m.label());
                         }
