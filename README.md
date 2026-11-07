@@ -137,8 +137,13 @@ A read-only sample project is built in, so the first screen shows a realistic gr
 
 ## Download
 
-A prebuilt Windows executable is attached to each [release](https://github.com/Vegaxys/Vegit/releases).
-It only needs [Git](https://git-scm.com/) on your `PATH`.
+Each [release](https://github.com/Vegaxys/Vegit/releases) has a Windows installer
+(`Vegit-Setup-<version>.exe`: no admin rights needed, Start menu entry, uninstall from Windows Settings)
+and the standalone executable. Both only need [Git](https://git-scm.com/) on your `PATH`.
+
+To build the installer yourself, install [Inno Setup 6](https://jrsoftware.org/isinfo.php)
+(`winget install JRSoftware.InnoSetup`) and run `installer\build.ps1`: it makes a release build and writes
+`target\installer\Vegit-Setup-<version>.exe`, with the version taken from `Cargo.toml`.
 
 ## Requirements (building from source)
 
@@ -229,4 +234,5 @@ cargo test -- --ignored
 | `src/icons.rs` | Draws the SVG icons, tinted with the theme colour |
 | `assets/icons/`, `assets/brand/` | Icons, logo and app icon, exported as SVG from the Figma icon sheet |
 | `build.rs` | Turns the app icon into the Windows `.exe` icon |
+| `installer/` | Windows installer (Inno Setup script and `build.ps1`) |
 | `docs/` | The presentation video and its poster |
