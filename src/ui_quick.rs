@@ -300,7 +300,10 @@ pub fn merge_items(ui: &mut egui::Ui, source: &str, label: &str, cur: &str, acts
 
 /// Makes a branch row or label draggable (its response must sense drags).
 pub fn drag_branch(resp: &egui::Response, name: &str) {
-    resp.dnd_set_drag_payload(DraggedBranch(name.to_string()));
+    // Left button only: a right-click that moves a little must still open the menu.
+    if resp.drag_started_by(egui::PointerButton::Primary) {
+        egui::DragAndDrop::set_payload(&resp.ctx, DraggedBranch(name.to_string()));
+    }
 }
 
 /// A local branch as a drop target: highlights while another branch is dragged over it,

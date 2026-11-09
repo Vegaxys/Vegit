@@ -1216,3 +1216,32 @@ fn deleting_new_files_spares_files_created_since() {
     assert_eq!(std::fs::read_to_string(dir.join("gen/deep/a.tmp")).unwrap(), "a");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A stash newer than its branch's tip never pulls the branch sideways: the commits keep
+/// their straight line, and the stash is the one that joins it.
+#[test]
+fn stashes_join_their_branch_instead_of_bending_it() {
+    let c = |sha: &str, parents: &[&str], stash: bool| git::Commit {
+        sha: sha.into(),
+        parents: parents.iter().map(|p| p.to_string()).collect(),
+        author: String::new(),
+        email: String::new(),
+        time: 0,
+        summary: String::new(),
+        body: String::new(),
+        stash: stash.then(|| "stash@{0}".to_string()),
+    };
+    // Newest first: the stash (on base), the branch tip (on base), base.
+    let commits = vec![c("s", &["base"], true), c("tip", &["base"], false), c("base", &[], false)];
+    let layout = graph::layout(&commits, None);
+    assert_eq!(layout.rows[1].col, layout.rows[2].col, "the branch stays on one column");
+    assert_ne!(layout.rows[0].col, layout.rows[2].col, "the stash sits beside it");
+}
+
+/// Co-authors are read from the commit message trailers, any case.
+#[test]
+fn pull_request_coauthors_come_from_commit_trailers() {
+    let msg = "Fix the blade\n\nLonger text.\n\nCo-authored-by: Claude <noreply@anthropic.com>\nco-authored-by: Ana <ana@example.com>\n";
+    assert_eq!(crate::pr::coauthors_of(msg), ["Claude <noreply@anthropic.com>", "Ana <ana@example.com>"]);
+    assert!(crate::pr::coauthors_of("No trailer here").is_empty());
+}

@@ -115,7 +115,12 @@ hooks, config and SSH keys behave exactly as they do in a terminal.
   rebase, cherry-pick or revert. Right-click a conflicted file to keep
   your version ("ours"), keep theirs, or mark it as resolved.
 - **Pull requests** on GitHub, GitLab (including self-hosted), Bitbucket Cloud and Azure DevOps:
-  list, check out and create them (drafts too).
+  list, check out and create them (drafts too). Branches with a pull request carry its icon in the graph,
+  and the toolbar shows « #42 » for the current branch's one.
+- **Pull request view** (GitHub; click a pull request): the pull request takes the centre (title and
+  description editable in place, checks and conflicts at a glance, merge with a choice of method, comments
+  and a box to add one, tabs for commits, checks and files) and its people the right (reviewers, assignees,
+  labels, milestone, commit co-authors, participants, draft / ready, close).
 - **Private repositories**: sign in with a token saved through git's credential helper
   (Git Credential Manager on Windows), or generate an SSH key. The app never stores secrets itself.
 - **Tabs** for several repositories, clone / init / open, submodules, "open in terminal / file explorer".
@@ -183,7 +188,7 @@ In screenshot mode, environment variables open other screens of the sample proje
 | `VEGIT_PREVIEW_PR=1` | The Create Pull Request dialog |
 | `VEGIT_PREVIEW_CONFLICT=1` | A merge stopped on a conflicted file |
 | `VEGIT_PREVIEW_SETTINGS=1`, `VEGIT_PREVIEW_ACCESS=1` | The settings or the access dialog |
-| `VEGIT_PREVIEW_QUICK=remote` | `remote`, `push`, `unmerged`: Add remote, Push…, delete an unmerged branch; `identity`: « Who are you? »; `rebase`: the banner with « Skip this commit »; `toast`: a toast with Undo; `undo`: named Undo / Redo; `picked`: three picked commits; `drop`: the menu after a drag and drop; `history`: Edit history; `conflict`: conflict cards; `worktree`: Open in a separate folder; `lfs`: Set up LFS for Unity; `compare`: two branches compared; `bisect`: the bisect banner; `options`: commit options |
+| `VEGIT_PREVIEW_QUICK=remote` | `remote`, `push`, `unmerged`: Add remote, Push…, delete an unmerged branch; `identity`: « Who are you? »; `rebase`: the banner with « Skip this commit »; `toast`: a toast with Undo; `undo`: named Undo / Redo; `picked`: three picked commits; `drop`: the menu after a drag and drop; `history`: Edit history; `conflict`: conflict cards; `worktree`: Open in a separate folder; `lfs`: Set up LFS for Unity; `compare`: two branches compared; `bisect`: the bisect banner; `options`: commit options; `prview`: the pull request view |
 
 For example (in a POSIX shell):
 

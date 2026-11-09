@@ -127,16 +127,15 @@ pub fn file_row(ui: &mut egui::Ui, f: &FileChange, pal: &Palette, selected: bool
         Some(i) => (&f.path[..=i], &f.path[i + 1..]),
         None => ("", f.path.as_str()),
     };
-    let font = FontId::proportional(13.0);
-    let mut x = rect.left() + 30.0;
-    if !dir.is_empty() && indent == 0.0 {
-        let dir_g = p.layout_no_wrap(dir.to_string(), font.clone(), pal.muted);
-        let w = dir_g.size().x;
-        p.galley(pos2(x, rect.center().y - dir_g.size().y / 2.0), dir_g, pal.muted);
-        x += w;
-    }
-    let name_g = p.layout_no_wrap(name.to_string(), font, pal.text);
+    // The file name first, then (in path view) its folder, smaller and quieter.
+    let x = rect.left() + 30.0;
+    let name_g = p.layout_no_wrap(name.to_string(), FontId::proportional(13.0), pal.text);
+    let name_w = name_g.size().x;
     p.galley(pos2(x, rect.center().y - name_g.size().y / 2.0), name_g, pal.text);
+    if !dir.is_empty() && indent == 0.0 {
+        let dir_g = p.layout_no_wrap(dir.trim_end_matches('/').to_string(), FontId::proportional(11.5), pal.muted);
+        p.galley(pos2(x + name_w + 8.0, rect.center().y - dir_g.size().y / 2.0 + 1.0), dir_g, pal.muted);
+    }
 
     let clicked_button = match button {
         Some(label) if hovered => hover_pill(ui, full, label, pal, resp.id.with("pill")),
@@ -153,12 +152,19 @@ pub fn hover_pill(ui: &mut egui::Ui, row: egui::Rect, label: &str, pal: &Palette
     let w = ui.painter().layout_no_wrap(label.to_string(), font.clone(), pal.text).size().x + 18.0;
     let r = egui::Rect::from_min_size(pos2(row.right() - w - 14.0, row.center().y - 10.0), vec2(w, 20.0));
     let resp = ui.interact(r, id, Sense::click());
-    let fill = if resp.hovered() { pal.accent } else { pal.accent.gamma_multiply(0.3) };
+    // Opaque, so the file name under it never shows through.
+    let fill = if resp.hovered() { pal.accent } else { mix(pal.card, pal.accent, 0.35) };
     let fg = if resp.hovered() { pal.accent_text } else { pal.text };
     let p = ui.painter();
     p.rect_filled(r, CornerRadius::same(10), fill);
     p.text(r.center(), Align2::CENTER_CENTER, label, font, fg);
     resp.clicked()
+}
+
+/// An opaque colour `t` of the way from `a` to `b`.
+pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let f = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(f(a.r(), b.r()), f(a.g(), b.g()), f(a.b(), b.b()))
 }
 
 /// A rounded block inside a tile (commit composer, commit summary, home cards).

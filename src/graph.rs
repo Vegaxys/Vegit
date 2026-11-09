@@ -49,35 +49,39 @@ pub fn layout(commits: &[Commit], pin: Option<&str>) -> GraphLayout {
     let index: HashMap<&str, usize> = commits.iter().enumerate().map(|(i, c)| (c.sha.as_str(), i)).collect();
     let pin = pin.filter(|p| index.contains_key(p));
 
-    // lanes[i] = sha the lane is waiting for, with the lane's colour.
-    let mut lanes: Vec<Option<(String, usize)>> = Vec::new();
+    // lanes[i] = sha the lane is waiting for, with the lane's colour, and whether a stash
+    // opened it: a stash never takes its base commit's line from the real branch.
+    let mut lanes: Vec<Option<Lane>> = Vec::new();
     let mut next_color = 0usize;
     let first_free = usize::from(pin.is_some());
     if let Some(p) = pin {
-        lanes.push(Some((p.to_string(), 0)));
+        lanes.push(Some((p.to_string(), 0, false)));
         next_color = 1;
     }
     let mut rows: Vec<Row> = Vec::with_capacity(commits.len());
     // For each row: lanes after the row was processed, and which lanes the row itself started.
-    let mut after_states: Vec<Vec<Option<(String, usize)>>> = Vec::with_capacity(commits.len());
+    let mut after_states: Vec<Vec<Option<Lane>>> = Vec::with_capacity(commits.len());
     let mut started: Vec<Vec<usize>> = Vec::with_capacity(commits.len());
     let mut joins: Vec<Vec<(usize, usize)>> = Vec::with_capacity(commits.len()); // (lane, color) of already-open parents
     let mut width = 1usize;
 
     for c in commits {
-        let col = match lanes.iter().position(|l| l.as_ref().is_some_and(|(s, _)| s == &c.sha)) {
+        let is_stash = c.stash.is_some();
+        // A real branch's lane first; a stash's lane only when nothing else waits here.
+        let waiting = |l: &Option<Lane>, stash_ok: bool| l.as_ref().is_some_and(|(s, _, st)| s == &c.sha && (stash_ok || !st));
+        let col = match lanes.iter().position(|l| waiting(l, false)).or_else(|| lanes.iter().position(|l| waiting(l, true))) {
             Some(i) => i,
             None => {
                 let i = free_lane(&mut lanes, first_free);
-                lanes[i] = Some((c.sha.clone(), next_color));
+                lanes[i] = Some((c.sha.clone(), next_color, is_stash));
                 next_color += 1;
                 i
             }
         };
-        let color = lanes[col].as_ref().map(|(_, k)| *k).unwrap_or(0);
+        let color = lanes[col].as_ref().map(|(_, k, _)| *k).unwrap_or(0);
         // Every other lane waiting for this commit ends here (branch merged into it).
         for l in lanes.iter_mut() {
-            if l.as_ref().is_some_and(|(s, _)| s == &c.sha) {
+            if l.as_ref().is_some_and(|(s, _, _)| s == &c.sha) {
                 *l = None;
             }
         }
@@ -87,12 +91,14 @@ pub fn layout(commits: &[Commit], pin: Option<&str>) -> GraphLayout {
         // Only parents that are in the loaded history get a line; older ones are cut off.
         let parents: Vec<&String> = c.parents.iter().filter(|p| index.contains_key(p.as_str())).collect();
         for (pi, p) in parents.iter().enumerate() {
-            if let Some(existing) = lanes.iter().position(|l| l.as_ref().is_some_and(|(s, _)| s == *p)) {
+            if let Some(existing) = lanes.iter().position(|l| l.as_ref().is_some_and(|(s, _, _)| s == *p)) {
                 // A first parent already waited for further right: keep this lane going
                 // straight instead, and let the right-hand lane merge into it later.
-                // That keeps the main line on one column with one colour.
-                if pi > 0 || existing < col {
-                    let k = lanes[existing].as_ref().map(|(_, k)| *k).unwrap_or(0);
+                // That keeps the main line on one column with one colour. A lane a stash
+                // opened never pulls a real commit sideways: the stash is the one that joins.
+                let stash_lane = lanes[existing].as_ref().is_some_and(|(_, _, st)| *st);
+                if pi > 0 || is_stash || (existing < col && !stash_lane) {
+                    let k = lanes[existing].as_ref().map(|(_, k, _)| *k).unwrap_or(0);
                     row_joins.push((existing, if pi == 0 { color } else { k }));
                     continue;
                 }
@@ -104,7 +110,7 @@ pub fn layout(commits: &[Commit], pin: Option<&str>) -> GraphLayout {
                 next_color += 1;
                 (i, next_color - 1)
             };
-            lanes[lane] = Some(((*p).clone(), lane_color));
+            lanes[lane] = Some(((*p).clone(), lane_color, is_stash));
             row_started.push(lane);
         }
 
@@ -122,13 +128,13 @@ pub fn layout(commits: &[Commit], pin: Option<&str>) -> GraphLayout {
         let col = rows[r].col;
         let mut edges = Vec::new();
         for (i, lane) in after_states[r].iter().enumerate() {
-            let Some((sha, color)) = lane else { continue };
+            let Some((sha, color, _)) = lane else { continue };
             let to_col = if Some(sha.as_str()) == next_sha { next_col.unwrap_or(i) } else { i };
             let from_col = if started[r].contains(&i) { col } else { i };
             edges.push(Edge { from_col, to_col, color: *color });
         }
         for &(lane, color) in &joins[r] {
-            let sha = after_states[r][lane].as_ref().map(|(s, _)| s.as_str());
+            let sha = after_states[r][lane].as_ref().map(|(s, _, _)| s.as_str());
             let to_col = if sha == next_sha { next_col.unwrap_or(lane) } else { lane };
             edges.push(Edge { from_col: col, to_col, color });
         }
@@ -138,7 +144,10 @@ pub fn layout(commits: &[Commit], pin: Option<&str>) -> GraphLayout {
     GraphLayout { rows, width }
 }
 
-fn free_lane(lanes: &mut Vec<Option<(String, usize)>>, first: usize) -> usize {
+/// What a lane waits for: (commit, colour, opened by a stash).
+type Lane = (String, usize, bool);
+
+fn free_lane(lanes: &mut Vec<Option<Lane>>, first: usize) -> usize {
     while lanes.len() < first {
         lanes.push(None);
     }

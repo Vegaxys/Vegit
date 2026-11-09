@@ -7,7 +7,7 @@
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 use eframe::epaint::CubicBezierShape;
 
-use crate::app::{Action, Dialog, PullMode, RepoTab, Selection};
+use crate::app::{Action, Dialog, PrState, PullMode, RepoTab, Selection};
 use crate::forge;
 use crate::git::{self, RefKind};
 use crate::icons::{self, Icon};
@@ -61,6 +61,17 @@ pub fn show(
     if total < avail {
         let slack_col = if visible[2] { 2 } else { (0..6).rev().find(|&i| visible[i]).unwrap_or(2) };
         eff[slack_col] += avail - total;
+    }
+    // A branch was clicked: if its line is further right than the graph column shows,
+    // widen the column so it comes into view.
+    if let Some(sha) = tab.focus_sha.take() {
+        if let Some(i) = tab.commit_index(&sha) {
+            let need = 14.0 + tab.graph.rows[i].col as f32 * lane_w + 24.0;
+            if visible[1] && eff[1] < need {
+                widths[1] = need;
+                eff[1] = need;
+            }
+        }
     }
     let content_w: f32 = eff.iter().sum();
 
@@ -218,9 +229,18 @@ pub fn show(
 
         // Branches open in another folder (worktrees), marked on their labels.
         let folders = crate::ui_big::branch_folders(tab);
+        // Branches with an open pull request carry its icon.
+        let pr_branches: std::collections::HashSet<String> = match &tab.prs {
+            PrState::Ready(_, prs) => prs.iter().map(|p| p.source.clone()).collect(),
+            _ => Default::default(),
+        };
         // Pass 1: row backgrounds, text and interaction.
         for row in range.clone() {
-            let (rect, resp) = ui.allocate_exact_size(vec2(content_w, ROW_H), Sense::click());
+            // The row's id comes from its commit, not its place in the visible range: a menu
+            // opened on it stays open while the list scrolls by a row (it used to flicker).
+            let (rect, _) = ui.allocate_exact_size(vec2(content_w, ROW_H), Sense::hover());
+            let key = if wip && row == 0 { "wip" } else { tab.snap.commits[row - offset].sha.as_str() };
+            let resp = ui.interact(rect, ui.scope_id().with(("graph_row", key)), Sense::click());
             let cols = cols_of(rect);
             let painter = ui.painter().clone();
 
@@ -236,7 +256,7 @@ pub fn show(
                 };
                 painter
                     .with_clip_rect(cols[2])
-                    .text(pos2(cols[2].left() + 10.0, rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(13.5), pal.muted);
+                    .text(pos2(cols[2].left() + 10.0, rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(12.5), pal.muted);
                 if resp.clicked() {
                     acts.push(Action::Select(Selection::Wip));
                 }
@@ -253,6 +273,18 @@ pub fn show(
             paint_row_bg(&painter, rect, pal, selected, resp.hovered(), row % 2 == 1);
             let text_col = if dim { pal.muted.gamma_multiply(0.6) } else { pal.text };
             let lane_color = pal.lane(tab.graph.rows[row - offset].color);
+            // The lane colour tints the row from its node to the message, ending in a bar.
+            if eff[1] > 0.0 && eff[2] > 0.0 {
+                let node_x = x_of(tab.graph.rows[row - offset].col);
+                let p = painter.with_clip_rect(cols[1].union(cols[2]));
+                let band = Rect::from_min_max(pos2(node_x, rect.top() + 3.0), pos2(cols[2].left(), rect.bottom() - 3.0));
+                if band.width() > 0.0 {
+                    let alpha = if dim { 0.06 } else if selected { 0.32 } else { 0.16 };
+                    p.rect_filled(band, CornerRadius { nw: 10, sw: 10, ne: 0, se: 0 }, lane_color.gamma_multiply(alpha));
+                }
+                let bar = if dim { lane_color.gamma_multiply(0.35) } else { lane_color };
+                p.rect_filled(Rect::from_min_size(pos2(cols[2].left(), rect.top() + 3.0), vec2(3.0, rect.height() - 6.0)), CornerRadius::ZERO, bar);
+            }
 
             // Ref labels; a double-click on a branch label switches to that branch.
             let rp = painter.with_clip_rect(cols[0].shrink2(vec2(4.0, 0.0)));
@@ -318,7 +350,8 @@ pub fn show(
                         RefKind::Local => (is_head.then_some(Icon::Check), synced.then_some(Icon::Cloud), pill_fill, Color32::WHITE),
                     };
                     let lead_w = if lead.is_some() { PILL_ICON_W } else { 0.0 };
-                    let trail_w = if trail.is_some() { PILL_ICON_W + 2.0 } else { 0.0 };
+                    let has_pr = r.kind != RefKind::Tag && pr_branches.contains(&label);
+                    let trail_w = if trail.is_some() { PILL_ICON_W + 2.0 } else { 0.0 } + if has_pr { PILL_ICON_W + 2.0 } else { 0.0 };
                     let natural_text = rp.layout_no_wrap(label.clone(), font.clone(), fg).size().x;
                     let rest = count - n - 1;
                     // Room for this pill, keeping space for a "+N" badge if others follow.
@@ -351,6 +384,9 @@ pub fn show(
                         pill_icon(&rp, pill.left() + 6.0, pill.center().y, icon, fg);
                     }
                     rp.galley(pos2(pill.left() + 7.0 + lead_w, pill.center().y - galley.size().y / 2.0), galley, fg);
+                    if has_pr {
+                        pill_icon(&rp, pill.right() - 7.0 - PILL_ICON_W, pill.center().y, Icon::PullRequest, fg);
+                    }
                     if let Some(icon) = trail {
                         pill_icon(&rp, pill.left() + 9.0 + lead_w + text_w, pill.center().y, icon, fg);
                     }
@@ -375,12 +411,12 @@ pub fn show(
             // Message: summary in the main text colour, then the description in the second shade.
             let mp = painter.with_clip_rect(cols[2].shrink2(vec2(6.0, 0.0)));
             let msg_col = if c.stash.is_some() && !dim { pal.text2() } else { text_col };
-            let summary = mp.layout_no_wrap(c.summary.clone(), FontId::proportional(13.5), msg_col);
+            let summary = mp.layout_no_wrap(c.summary.clone(), FontId::proportional(12.5), msg_col);
             let sw = summary.size().x;
             mp.galley(pos2(cols[2].left() + 10.0, rect.center().y - summary.size().y / 2.0), summary, msg_col);
             if show_desc && !c.body.is_empty() {
                 let body_col = if dim { pal.muted.gamma_multiply(0.5) } else { pal.muted };
-                mp.text(pos2(cols[2].left() + 22.0 + sw, rect.center().y), Align2::LEFT_CENTER, &c.body, FontId::proportional(13.0), body_col);
+                mp.text(pos2(cols[2].left() + 22.0 + sw, rect.center().y), Align2::LEFT_CENTER, &c.body, FontId::proportional(12.0), body_col);
             }
             // Author
             let ap = painter.with_clip_rect(cols[3]);
@@ -441,7 +477,8 @@ pub fn show(
                         _ => Action::CheckoutLocal(r.name.clone()),
                     });
                 } else if pr.clicked() {
-                    acts.push(Action::Select(Selection::Commit(c.sha.clone())));
+                    // Clicking a label shows its commit and brings its line into view.
+                    acts.push(Action::SelectRef(c.sha.clone()));
                 }
                 let pr = match &elsewhere {
                     Some(p) => pr.on_hover_text(format!("Open in another folder: {}\nDouble-click to go to its tab", p.display())),

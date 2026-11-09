@@ -166,6 +166,56 @@ fn request(method: &str, url: &str, repo: &RemoteRepo, cred: &Option<(String, St
     serde_json::from_str(&text).map_err(|e| format!("Unexpected answer from {}: {e}", repo.forge.name()))
 }
 
+/// Any API call (GET, POST, PATCH, PUT, DELETE), for the pull request view. An empty
+/// answer (204) becomes `null`.
+pub(crate) fn call(method: &str, url: &str, repo: &RemoteRepo, cred: &Option<(String, String)>, body: Option<Value>) -> Result<Value, String> {
+    let agent = agent();
+    let auth = auth_header(repo.forge, cred);
+    macro_rules! with_headers {
+        ($req:expr) => {{
+            let mut r = $req.header("User-Agent", "Vegit").header("Accept", "application/json");
+            if let Some(h) = &auth {
+                r = r.header("Authorization", h);
+            }
+            r
+        }};
+    }
+    let body = body.unwrap_or(Value::Null);
+    let sent = match method {
+        "POST" => with_headers!(agent.post(url)).send_json(body),
+        "PATCH" => with_headers!(agent.patch(url)).send_json(body),
+        "PUT" => with_headers!(agent.put(url)).send_json(body),
+        "DELETE" => with_headers!(agent.delete(url)).force_send_body().send_json(body),
+        _ => with_headers!(agent.get(url)).call(),
+    };
+    let mut resp = sent.map_err(|e| format!("Could not reach {}: {e}", repo.forge.name()))?;
+    let status = resp.status().as_u16();
+    let text = resp.body_mut().read_to_string().unwrap_or_default();
+    if status == 401 || (status == 404 && cred.is_none()) {
+        return Err(format!("{} refused access ({status}). Sign in (Access window) to work on {}s.", repo.forge.name(), repo.forge.noun()));
+    }
+    if !(200..300).contains(&status) {
+        let detail: String = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v.get("message").or_else(|| v.get("error")).and_then(|m| m.as_str().map(str::to_string)))
+            .unwrap_or_else(|| text.chars().take(200).collect());
+        return Err(format!("{} answered {status}: {detail}", repo.forge.name()));
+    }
+    if text.trim().is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_str(&text).map_err(|e| format!("Unexpected answer from {}: {e}", repo.forge.name()))
+}
+
+/// Base URL of the GitHub API for this host (github.com or GitHub Enterprise).
+pub(crate) fn github_api(repo: &RemoteRepo) -> String {
+    if repo.host == "github.com" { "https://api.github.com".to_string() } else { format!("https://{}/api/v3", repo.host) }
+}
+
+pub(crate) fn text_at(v: &Value, path: &[&str]) -> String {
+    s(v, path)
+}
+
 fn enc(s: &str) -> String {
     s.bytes()
         .map(|b| match b {

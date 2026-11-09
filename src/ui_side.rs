@@ -108,13 +108,21 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<
                     }
                     let resp = ui
                         .add(egui::Button::selectable(false, text).frame_when_inactive(false).truncate())
-                        .on_hover_text(format!("{}\n{} wants to merge {} into {}\nDouble-click to check it out", pr.title, pr.author, pr.source, pr.target));
+                        .on_hover_text(format!("{}\n{} wants to merge {} into {}\nClick to open it · double-click to check it out", pr.title, pr.author, pr.source, pr.target));
+                    // A click opens the pull request view; a double-click checks it out.
                     if resp.double_clicked() {
                         acts.push(Action::CheckoutPullRequest(i));
+                    } else if resp.clicked() {
+                        acts.push(Action::OpenPrView(pr.number));
                     }
                     let url = pr.url.clone();
+                    let number = pr.number;
                     resp.context_menu(|ui| {
                         crate::util::menu_pad(ui);
+                        if ui.button("Open in Vegit").clicked() {
+                            acts.push(Action::OpenPrView(number));
+                            ui.close();
+                        }
                         if ui.button("Open in the browser").clicked() {
                             acts.push(Action::OpenUrl(url.clone()));
                             ui.close();

@@ -277,6 +277,10 @@ pub struct RepoTab {
     pub commit_opts: crate::extras::CommitOptions,
     /// More history was asked for and is loading.
     pub loading_more: bool,
+    /// A commit whose graph line must be visible (the column widens if needed).
+    pub focus_sha: Option<String>,
+    /// The pull request view, taking the place of the sidebar, graph and details.
+    pub pr_view: Option<crate::pr::PrView>,
     pub file_view: Option<FileView>,
     /// Files picked in the working-changes lists (Ctrl/Shift+click), all in one list.
     pub picked: HashSet<String>,
@@ -284,8 +288,12 @@ pub struct RepoTab {
     /// Last plainly clicked file, start of a Shift+click range.
     pub anchor: Option<String>,
     pub prs: PrState,
-    /// Unstaged / staged lists folded to their header.
-    pub folded: [bool; 2],
+    /// Unstaged list, staged list and the commit / stash section folded to their header.
+    pub folded: [bool; 3],
+    /// The bottom section shows the Stash tab rather than Commit.
+    pub composer_stash: bool,
+    /// Message typed in the Stash tab.
+    pub stash_message: String,
     /// Share of the height given to the unstaged list, once the divider was dragged.
     pub wip_split: Option<f32>,
     /// Only this author's commits stay bright in the graph.
@@ -343,12 +351,16 @@ impl RepoTab {
             signatures: HashMap::new(),
             commit_opts: Default::default(),
             loading_more: false,
+            focus_sha: None,
+            pr_view: None,
             file_view: None,
             picked: HashSet::new(),
             picked_list: ListId::Unstaged,
             anchor: None,
             prs: PrState::NotLoaded,
-            folded: [false, false],
+            folded: [false, false, false],
+            composer_stash: false,
+            stash_message: String::new(),
             wip_split: None,
             author_filter: None,
             graph_hscroll: 0.0,
@@ -685,6 +697,11 @@ pub enum Action {
     CheckRepo,
     SetCommitOptions(crate::extras::CommitOptions),
     GrepAt { sha: String, query: String },
+    // The pull request view (ui_pr.rs).
+    OpenPrView(u64),
+    ClosePrView,
+    RefreshPr,
+    EditPr(crate::pr::PrEdit),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -783,6 +800,8 @@ enum JobDone {
     Ignored { files: Vec<String>, size: u64 },
     Maintenance { result: Result<String, String> },
     Grep { sha: String, query: String, result: Result<Vec<(String, u32, String)>, String> },
+    PrDetail { tab_path: PathBuf, number: u64, result: Result<crate::pr::PrDetail, String> },
+    PrEdited { tab_path: PathBuf, text: String, result: Result<(), String> },
     Signatures { tab_path: PathBuf, sigs: HashMap<String, (char, String)> },
 }
 
@@ -1031,6 +1050,39 @@ impl VegitApp {
                     "bisect" => {
                         let candidates = t.snap.commits.iter().take(6).map(|c| c.sha.clone()).collect();
                         t.snap.bisect = Some(crate::extras::Bisect { candidates, tested: 2, steps_left: 3 });
+                    }
+                    "prview" => {
+                        let mut v = crate::pr::PrView::new(42);
+                        let commits = t.snap.commits.iter().take(3).map(|c| crate::pr::PrCommit {
+                            sha: c.sha.clone(),
+                            summary: c.summary.clone(),
+                            author: c.author.clone(),
+                            coauthors: vec!["Claude <noreply@anthropic.com>".into()],
+                        });
+                        v.detail = Some(Ok(crate::pr::PrDetail {
+                            number: 42,
+                            title: "Login: remember the last used email".into(),
+                            body: "Remembers the e-mail typed last time, so signing in is one field less.\n\n- stored in the settings file\n- cleared on sign-out".into(),
+                            state: "open".into(),
+                            author: "lee-chen".into(),
+                            source: "feature/login".into(),
+                            target: "main".into(),
+                            url: "https://github.com/acme/sample-project/pull/42".into(),
+                            created: "2026-11-02 03:23:00".into(),
+                            additions: 128,
+                            deletions: 14,
+                            mergeable: Some(true),
+                            reviewers: vec!["sam-rivera".into()],
+                            reviews: vec![("alex-martin".into(), "APPROVED".into())],
+                            assignees: vec!["lee-chen".into()],
+                            labels: vec!["login".into(), "4.4.0".into()],
+                            commits: commits.collect(),
+                            comments: vec![crate::pr::PrComment { author: "alex-martin".into(), body: "Looks good; the setting name could say 'last email'.".into(), when: "2026-11-02 05:10:00".into() }],
+                            checks: vec![crate::pr::PrCheck { name: "build".into(), state: "success".into() }, crate::pr::PrCheck { name: "tests".into(), state: "success".into() }],
+                            files: demo::files_for("").iter().map(|f| crate::pr::PrFile { path: f.path.clone(), additions: 40, deletions: 3, status: "modified".into() }).collect(),
+                            ..Default::default()
+                        }));
+                        t.pr_view = Some(v);
                     }
                     "options" => {
                         t.commit_opts = crate::extras::CommitOptions { open: true, signoff: true, coauthors: vec!["Noor Haddad <noor@example.com>".into()], ..Default::default() };
@@ -1485,6 +1537,23 @@ impl VegitApp {
                         }
                     }
                 }
+                JobDone::PrDetail { tab_path, number, result } => {
+                    if let Some(v) = self.tab_by_path(&tab_path).and_then(|t| t.pr_view.as_mut()).filter(|v| v.number == number) {
+                        v.detail = Some(result);
+                        v.busy = false;
+                    }
+                }
+                JobDone::PrEdited { tab_path, text, result } => {
+                    match result {
+                        Ok(()) => self.toast(ctx, text, ToastKind::Success),
+                        Err(e) => self.toast(ctx, e, ToastKind::Error),
+                    }
+                    if let Some(v) = self.tab_by_path(&tab_path).and_then(|t| t.pr_view.as_mut()) {
+                        v.busy = false;
+                    }
+                    self.spawn_pr_detail(ctx, tab_path.clone());
+                    self.spawn_prs(ctx, tab_path, false);
+                }
                 JobDone::Maintenance { result } => {
                     self.busy.retain(|b| b != "Speeding up");
                     match result {
@@ -1640,6 +1709,7 @@ impl VegitApp {
                 if let Some(tab) = self.tab() {
                     if let Some(i) = tab.commit_index(&target) {
                         tab.scroll_to = Some(i + usize::from(tab.has_wip_row()));
+                        tab.focus_sha = Some(target.clone());
                         tab.diff = None;
                         self.select(Selection::Commit(target.clone()));
                     } else {

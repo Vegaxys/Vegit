@@ -64,7 +64,8 @@ pub fn flatten<'a>(files: &'a [FileChange], tree: bool, collapsed: &HashSet<Stri
 
 /// A folder line of the tree: chevron, folder shape, name. Returns the row response and
 /// whether its hover button was clicked.
-pub fn folder_row(ui: &mut egui::Ui, name: &str, depth: usize, collapsed: bool, pal: &Palette, button: Option<&str>) -> (egui::Response, bool) {
+/// `changes`: how many changed files the folder holds, shown after its name.
+pub fn folder_row(ui: &mut egui::Ui, name: &str, changes: usize, depth: usize, collapsed: bool, pal: &Palette, button: Option<&str>) -> (egui::Response, bool) {
     let (full, resp) = ui.allocate_exact_size(vec2(ui.available_width(), FILE_ROW_H), Sense::click());
     let p = ui.painter_at(full);
     let hovered = ui.rect_contains_pointer(full);
@@ -76,7 +77,9 @@ pub fn folder_row(ui: &mut egui::Ui, name: &str, depth: usize, collapsed: bool, 
     let chevron = if collapsed { Icon::ChevronRight } else { Icon::ChevronDown };
     icons::paint(&p, egui::Rect::from_center_size(pos2(x + 8.0, cy), vec2(13.0, 13.0)), chevron, pal.muted);
     icons::paint(&p, egui::Rect::from_center_size(pos2(x + 26.0, cy), vec2(17.0, 17.0)), Icon::Folder, pal.accent);
-    p.text(pos2(x + 40.0, cy), Align2::LEFT_CENTER, name, FontId::proportional(13.0), pal.text2());
+    let r = p.text(pos2(x + 40.0, cy), Align2::LEFT_CENTER, name, FontId::proportional(13.0), pal.text2());
+    let what = if changes == 1 { "1 change".to_string() } else { format!("{changes} changes") };
+    p.text(pos2(r.right() + 6.0, cy), Align2::LEFT_CENTER, format!("({what})"), FontId::proportional(11.5), pal.muted);
 
     let clicked_button = match button {
         Some(label) if hovered => crate::util::hover_pill(ui, full, label, pal, resp.id.with("pill")),

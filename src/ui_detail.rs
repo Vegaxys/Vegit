@@ -6,7 +6,7 @@
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Rect, RichText, Sense, Stroke, pos2, vec2};
 
-use crate::app::{Action, Dialog, FileViewKind, HunkMode, ImageState, ListId, RepoTab, Selection, ShownImage};
+use crate::app::{Action, FileViewKind, HunkMode, ImageState, ListId, RepoTab, Selection, ShownImage};
 use crate::diff::{DiffMode, DiffRow, LineKind, ParsedDiff, SplitRow};
 use crate::filelist::{self, Entry, INDENT};
 use crate::git::{self, DiffSource, FileChange, FileState};
@@ -30,7 +30,30 @@ pub fn show(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, sor
     }
     match tab.selection.clone() {
         Selection::Wip => wip(ui, tab, pal, tree, sort_by_status, acts),
-        Selection::Commit(sha) => commit(ui, tab, &sha, pal, tree, acts),
+        Selection::Commit(sha) => {
+            // Looking at a commit while work is waiting: say so, one click away.
+            let n = tab.snap.status.unstaged.len() + tab.snap.status.staged.len();
+            if n > 0 {
+                egui::Frame::new()
+                    .fill(pal.warn.gamma_multiply(0.15))
+                    .stroke(Stroke::new(1.0, pal.warn.gamma_multiply(0.8)))
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(egui::Margin::symmetric(10, 6))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("You have {n} uncommitted change{}.", if n == 1 { "" } else { "s" })).color(pal.text));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("Show them").clicked() {
+                                    acts.push(Action::Select(Selection::Wip));
+                                }
+                            });
+                        });
+                    });
+                ui.add_space(4.0);
+            }
+            commit(ui, tab, &sha, pal, tree, acts)
+        }
     }
 }
 
@@ -193,7 +216,7 @@ fn wip(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, sort_by_
     let min_list = SECTION_HEAD_H + 2.0 * FILE_ROW_H;
     // A folded list keeps its header plus a little air before the next block.
     let head = SECTION_HEAD_H + 8.0;
-    let (top_h, bottom_h) = match tab.folded {
+    let (top_h, bottom_h) = match [tab.folded[0], tab.folded[1]] {
         [true, true] => (head, head),
         [true, false] => (head, avail - head),
         [false, true] => (avail - head, head),
@@ -207,7 +230,7 @@ fn wip(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool, sort_by_
     ui.allocate_ui(vec2(w, top_h), |ui| file_section(ui, tab, pal, tree, sort_by_status, Side::Unstaged, top_h, acts));
 
     let (div, resp) = ui.allocate_exact_size(vec2(w, DIVIDER_H), Sense::click_and_drag());
-    let can_drag = tab.folded == [false, false];
+    let can_drag = !tab.folded[0] && !tab.folded[1];
     let active = can_drag && (resp.hovered() || resp.dragged());
     if can_drag && resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
@@ -240,8 +263,8 @@ fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool,
     };
     ui.allocate_ui_with_layout(vec2(ui.available_width(), SECTION_HEAD_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
         let (title, button, action, tone) = match side {
-            Side::Unstaged => ("Unstaged Files", "Stage All Changes", Action::StageAll, pal.added),
-            Side::Staged => ("Staged Files", "Unstage All Changes", Action::UnstageAll, pal.removed),
+            Side::Unstaged => ("Unstaged Files", "Stage All", Action::StageAll, pal.added),
+            Side::Staged => ("Staged Files", "Unstage All", Action::UnstageAll, pal.removed),
         };
         // Outlined in green (stage) or red (unstage), like the reference.
         let section_button = |text: &str| {
@@ -261,7 +284,7 @@ fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool,
         }
         if folded {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled(!files.is_empty(), section_button(button)).clicked() {
+                if (side == Side::Unstaged || !files.is_empty()) && ui.add_enabled(!files.is_empty(), section_button(button)).clicked() {
                     acts.push(action.clone());
                 }
             });
@@ -275,7 +298,7 @@ fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool,
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add_enabled(!files.is_empty(), section_button(button)).clicked() {
+            if (side == Side::Unstaged || !files.is_empty()) && ui.add_enabled(!files.is_empty(), section_button(button)).clicked() {
                 acts.push(action);
             }
         });
@@ -330,7 +353,9 @@ fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool,
             match e {
                 Entry::Folder { path, name, depth, collapsed } => {
                     let label = if side == Side::Staged { "Unstage" } else { "Stage" };
-                    let (resp, button) = filelist::folder_row(ui, name, *depth, *collapsed, pal, Some(label));
+                    let prefix = format!("{path}/");
+                    let changes = files.iter().filter(|f| f.path.starts_with(&prefix)).count();
+                    let (resp, button) = filelist::folder_row(ui, name, changes, *depth, *collapsed, pal, Some(label));
                     if button {
                         acts.push(if side == Side::Staged { Action::UnstagePath(path.to_string()) } else { Action::StagePath(path.to_string()) });
                     } else if resp.clicked() {
@@ -529,26 +554,78 @@ fn file_menu(resp: &egui::Response, group: &[FileChange], side: Option<Side>, lo
     });
 }
 
+/// The Stash tab: a message, then "Stash staged files" (main) or "Stash all" (secondary).
+fn stash_form(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<Action>) {
+    ui.add_space(6.0);
+    ui.label(RichText::new("Put changes aside and get back to a clean folder; Pop brings them back.").size(12.0).color(pal.muted));
+    egui::Frame::new().fill(pal.canvas).stroke(Stroke::new(1.0, pal.border)).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+        ui.add(egui::TextEdit::multiline(&mut tab.stash_message).frame(egui::Frame::NONE).hint_text("What were you working on? (optional)").desired_rows(2).desired_width(f32::INFINITY));
+    });
+    ui.add_space(6.0);
+    let (staged, all) = (tab.snap.status.staged.len(), tab.snap.status.staged.len() + tab.snap.status.unstaged.len());
+    let msg = tab.stash_message.trim().to_string();
+    let with_msg = |mut args: Vec<String>| {
+        if !msg.is_empty() {
+            args.extend(["-m".into(), msg.clone()]);
+        }
+        args
+    };
+    let w = ui.available_width();
+    let h = 36.0;
+    let (row, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    let split = (w * 0.62).floor();
+    let left = Rect::from_min_size(row.min, vec2(split - 2.0, h));
+    let right = Rect::from_min_max(pos2(row.left() + split + 2.0, row.top()), row.max);
+    let main = egui::Button::new(RichText::new(format!("Stash staged files ({staged})")).color(pal.accent_text)).fill(pal.accent).corner_radius(CornerRadius { nw: 8, sw: 8, ne: 0, se: 0 });
+    if ui.put(left, main).on_hover_text("git stash push --staged: only what is staged goes aside").clicked() && staged > 0 {
+        acts.push(Action::Git { label: format!("Stashed {staged} staged file{}", if staged == 1 { "" } else { "s" }), args: with_msg(vec!["stash".into(), "push".into(), "--staged".into()]), background: false });
+        tab.stash_message.clear();
+    }
+    let second = egui::Button::new(format!("Stash all ({all})")).corner_radius(CornerRadius { nw: 0, sw: 0, ne: 8, se: 8 });
+    if ui.put(right, second).on_hover_text("git stash push -u: every change, new files included").clicked() && all > 0 {
+        acts.push(Action::Git { label: "Changes stashed".into(), args: with_msg(vec!["stash".into(), "push".into(), "-u".into()]), background: false });
+        tab.stash_message.clear();
+    }
+}
+
 fn composer(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, acts: &mut Vec<Action>) {
-    // Tab row: "Commit" (active) and a stash shortcut, over a line.
+    // Third section of the panel, foldable like the two lists: a chevron, then two tabs,
+    // Commit and Stash, that change what is below them.
     let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
-    let commit_tab = Rect::from_min_size(bar.min, vec2(104.0, bar.height()));
-    {
+    let folded = tab.folded[2];
+    let chev = Rect::from_min_size(bar.min, vec2(18.0, bar.height()));
+    let cr = ui.interact(chev, ui.scope_id().with("composer_fold"), Sense::click());
+    icons::paint(ui.painter(), Rect::from_center_size(chev.center(), vec2(14.0, 14.0)), if folded { Icon::ChevronRight } else { Icon::ChevronDown }, pal.text2());
+    if cr.on_hover_text(if folded { "Show" } else { "Fold" }).clicked() {
+        tab.folded[2] = !folded;
+    }
+    let mut x = chev.right() + 4.0;
+    for (stash, icon, label, w) in [(false, Icon::Commit, "Commit", 104.0), (true, Icon::Stash, "Stash", 92.0)] {
+        let r = Rect::from_min_size(pos2(x, bar.top()), vec2(w, bar.height()));
+        let resp = ui.interact(r, ui.scope_id().with(("composer_tab", stash)), Sense::click());
+        let active = tab.composer_stash == stash && !folded;
         let p = ui.painter();
-        p.rect_filled(commit_tab, CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, pal.card);
-        let c = pos2(commit_tab.left() + 18.0, commit_tab.center().y);
-        icons::paint(p, Rect::from_center_size(c, vec2(18.0, 18.0)), Icon::Commit, pal.text);
-        p.text(pos2(commit_tab.left() + 34.0, commit_tab.center().y), Align2::LEFT_CENTER, "Commit", egui::FontId::proportional(14.0), pal.text);
-        p.rect_filled(Rect::from_min_size(pos2(bar.left(), bar.bottom() - 1.0), vec2(bar.width(), 1.0)), CornerRadius::ZERO, pal.border);
+        if active {
+            p.rect_filled(r, CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, pal.card);
+        } else if resp.hovered() {
+            p.rect_filled(r.shrink2(vec2(0.0, 3.0)), CornerRadius::same(5), pal.hover);
+        }
+        let color = if active { pal.text } else { pal.text2() };
+        icons::paint(p, Rect::from_center_size(pos2(r.left() + 18.0, r.center().y), vec2(17.0, 17.0)), icon, color);
+        p.text(pos2(r.left() + 34.0, r.center().y), Align2::LEFT_CENTER, label, egui::FontId::proportional(14.0), color);
+        let tip = if stash { "Put changes aside with a message: the staged ones, or all of them" } else { "Write the message and commit the staged files" };
+        if resp.on_hover_text(tip).clicked() {
+            tab.composer_stash = stash;
+            tab.folded[2] = false;
+        }
+        x = r.right() + 4.0;
     }
-    let stash_r = Rect::from_min_size(pos2(commit_tab.right() + 6.0, bar.top() + 3.0), vec2(30.0, bar.height() - 6.0));
-    let sr = ui.interact(stash_r, ui.scope_id().with("composer_stash"), Sense::click());
-    if sr.hovered() {
-        ui.painter().rect_filled(stash_r, CornerRadius::same(5), pal.hover);
+    ui.painter().rect_filled(Rect::from_min_size(pos2(bar.left(), bar.bottom() - 1.0), vec2(bar.width(), 1.0)), CornerRadius::ZERO, pal.border);
+    if folded {
+        return;
     }
-    icons::paint(ui.painter(), stash_r.shrink2(vec2(7.0, 6.0)), Icon::Stash, pal.text2());
-    if sr.on_hover_text("Stash these changes").clicked() && !tab.snap.status.is_clean() {
-        acts.push(Action::Dialog(Dialog::Stash { message: String::new(), include_untracked: true }));
+    if tab.composer_stash {
+        return stash_form(ui, tab, pal, acts);
     }
     ui.add_space(6.0);
     ui.checkbox(&mut tab.amend, RichText::new("Amend previous commit").color(pal.text2()));
@@ -718,7 +795,9 @@ fn commit(ui: &mut egui::Ui, tab: &mut RepoTab, sha: &str, pal: &Palette, tree: 
         for e in &entries[range] {
             match e {
                 Entry::Folder { path, name, depth, collapsed } => {
-                    let (resp, _) = filelist::folder_row(ui, name, *depth, *collapsed, pal, None);
+                    let prefix = format!("{path}/");
+                    let changes = files.iter().filter(|f| f.path.starts_with(&prefix)).count();
+                    let (resp, _) = filelist::folder_row(ui, name, changes, *depth, *collapsed, pal, None);
                     if resp.clicked() {
                         acts.push(Action::ToggleFolder(ListId::Commit, path.to_string()));
                     }

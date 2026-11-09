@@ -376,6 +376,21 @@ impl VegitApp {
                         if tb(ui, Icon::Terminal, "Terminal", !tab.is_sample()).on_hover_text("Open a terminal here").clicked() {
                             acts.push(Action::OpenTerminal);
                         }
+                        // The current branch has a pull request: one click opens it.
+                        let branch_pr = match (&tab.prs, &tab.snap.head_branch) {
+                            (crate::app::PrState::Ready(repo, prs), Some(b)) => prs.iter().find(|p| &p.source == b).map(|p| (p.number, p.title.clone(), repo.forge.noun())),
+                            _ => None,
+                        };
+                        if let Some((number, title, noun)) = branch_pr {
+                            let icon = icons::image(ui.ctx(), Icon::PullRequest, 15.0, pal.accent);
+                            let b = egui::Button::image_and_text(icon, RichText::new(format!("#{number}")).color(pal.accent).strong())
+                                .stroke(Stroke::new(1.0, pal.accent.gamma_multiply(0.6)))
+                                .corner_radius(CornerRadius::same(8))
+                                .min_size(vec2(0.0, 30.0));
+                            if ui.add(b).on_hover_text(format!("This branch's {noun}: {title}")).clicked() {
+                                acts.push(Action::OpenPrView(number));
+                            }
+                        }
                         ui.spacing_mut().item_spacing.x = g as f32;
                         divider(ui, pal);
 
@@ -488,25 +503,40 @@ impl VegitApp {
             });
 
         let side_frame = |left: i8, right: i8| egui::Frame::new().fill(Color32::TRANSPARENT).inner_margin(egui::Margin { left, right, top: 0, bottom: g });
-        egui::Panel::left("sidebar")
-            .default_size(260.0)
-            .size_range(190.0..=440.0)
-            .show_separator_line(false)
-            .frame(side_frame(g * 2, 0))
-            .show(ui, |ui| fill_tile(ui, pal, |ui| ui_side::show(ui, tab, pal, &mut acts)));
+        // The pull request view takes the whole width: no sidebar, the pull request in the
+        // centre and its people on the right.
+        let pr_open = tab.pr_view.is_some();
+        if !pr_open {
+            egui::Panel::left("sidebar")
+                .default_size(260.0)
+                .size_range(190.0..=440.0)
+                .show_separator_line(false)
+                .frame(side_frame(g * 2, 0))
+                .show(ui, |ui| fill_tile(ui, pal, |ui| ui_side::show(ui, tab, pal, &mut acts)));
+        }
 
         egui::Panel::right("details")
             .default_size(380.0)
             .size_range(290.0..=660.0)
             .show_separator_line(false)
             .frame(side_frame(0, g * 2))
-            .show(ui, |ui| fill_tile(ui, pal, |ui| ui_detail::show(ui, tab, pal, tree, sort_by_status, &mut acts)));
+            .show(ui, |ui| {
+                fill_tile(ui, pal, |ui| {
+                    if pr_open {
+                        crate::ui_pr::side(ui, tab, pal, &mut acts);
+                    } else {
+                        ui_detail::show(ui, tab, pal, tree, sort_by_status, &mut acts);
+                    }
+                })
+            });
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(Color32::TRANSPARENT).inner_margin(egui::Margin { left: g, right: g, top: 0, bottom: g }))
             .show(ui, |ui| {
                 fill_tile(ui, pal, |ui| {
-                    if tab.loading {
+                    if pr_open {
+                        crate::ui_pr::main(ui, tab, pal, &mut acts);
+                    } else if tab.loading {
                         ui_detail::loading(ui, "Reading the history…");
                     } else if tab.conflict.is_some() {
                         crate::ui_big::conflict_view(ui, tab, pal, &mut acts);

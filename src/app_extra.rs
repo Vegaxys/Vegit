@@ -325,6 +325,39 @@ impl VegitApp {
                     ctx2.request_repaint();
                 });
             }
+            Action::OpenPrView(number) => {
+                let Some(repo) = self.active_path() else { return self.sample_refusal(ctx) };
+                if let Some(t) = self.tab() {
+                    t.pr_view = Some(crate::pr::PrView::new(number));
+                }
+                self.spawn_pr_detail(ctx, repo);
+            }
+            Action::ClosePrView => {
+                if let Some(t) = self.tab() {
+                    t.pr_view = None;
+                }
+            }
+            Action::RefreshPr => {
+                if let Some(repo) = self.active_path() {
+                    self.spawn_pr_detail(ctx, repo);
+                }
+            }
+            Action::EditPr(e) => {
+                let Some(repo) = self.active_path() else { return self.sample_refusal(ctx) };
+                let Some(number) = self.tab().and_then(|t| t.pr_view.as_mut()).map(|v| {
+                    v.busy = true;
+                    v.number
+                }) else {
+                    return;
+                };
+                let tx = self.jobs_tx.clone();
+                let ctx2 = ctx.clone();
+                std::thread::spawn(move || {
+                    let result = crate::pr::edit(&repo, number, &e);
+                    let _ = tx.send(JobDone::PrEdited { tab_path: repo, text: e.done_text(), result });
+                    ctx2.request_repaint();
+                });
+            }
             Action::SetCommitOptions(opts) => {
                 if let Some(t) = self.tab() {
                     t.commit_opts = opts;
@@ -415,6 +448,18 @@ impl VegitApp {
                 cv.title = format!("{} · {e}", cv.title);
             }
         }
+    }
+
+    /// Reads the open pull request view's pull request on a network thread.
+    pub(super) fn spawn_pr_detail(&mut self, ctx: &egui::Context, repo: PathBuf) {
+        let Some(number) = self.tab_by_path(&repo).and_then(|t| t.pr_view.as_ref()).map(|v| v.number) else { return };
+        let tx = self.jobs_tx.clone();
+        let ctx2 = ctx.clone();
+        std::thread::spawn(move || {
+            let result = crate::pr::detail(&repo, number);
+            let _ = tx.send(JobDone::PrDetail { tab_path: repo, number, result });
+            ctx2.request_repaint();
+        });
     }
 
     /// Signatures of recent commits, read in the background after each reload.
