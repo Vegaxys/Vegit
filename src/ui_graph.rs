@@ -771,12 +771,22 @@ pub fn commit_menu(resp: &egui::Response, tab: &RepoTab, sha: &str, on_ref: Opti
             acts.push(Action::Dialog(Dialog::NewTag { at: sha.clone(), name: String::new(), message: String::new() }));
             ui.close();
         }
-        if ui.button("Check out this commit").clicked() {
+        // Checking out a commit that carries a branch jumps to that branch.
+        if let Some(b) = branch.as_ref().filter(|b| b.kind != RefKind::Tag && !is_current) {
+            if ui.button(format!("Check out {}", b.name)).on_hover_text("Switch to this branch").clicked() {
+                acts.push(match b.kind {
+                    RefKind::Remote => Action::CheckoutRemote(b.name.clone()),
+                    _ => Action::CheckoutLocal(b.name.clone()),
+                });
+                ui.close();
+            }
+        }
+        if !(is_head && current.is_none()) && ui.button("Create HEAD from this commit").on_hover_text("Detached HEAD on this commit, without a branch").clicked() {
             acts.push(Action::Dialog(Dialog::Confirm {
-                title: "Check out this commit?".into(),
+                title: "Create a HEAD on this commit?".into(),
                 body: "You will be on this commit without a branch (\"detached\"). Create a branch if you want to keep new work.".into(),
-                confirm: "Check out".into(),
-                then: Box::new(git_action(format!("Checked out {short}"), &["switch", "--detach", &sha])),
+                confirm: "Create HEAD".into(),
+                then: Box::new(git_action(format!("HEAD on {short}"), &["switch", "--detach", &sha])),
             }));
             ui.close();
         }
