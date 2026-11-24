@@ -19,6 +19,8 @@ use crate::{ui_detail, ui_graph, ui_side};
 /// Frames drawn before the `--screenshot` picture is taken.
 const SCREENSHOT_FRAME: u32 = 120;
 const HEADER_H: f32 = 44.0;
+/// macOS draws its own window frame and traffic lights; elsewhere the app draws them.
+const NATIVE_FRAME: bool = cfg!(target_os = "macos");
 
 impl eframe::App for VegitApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -49,7 +51,7 @@ impl eframe::App for VegitApp {
         let bg = ctx.layer_painter(egui::LayerId::background());
         crate::backdrop::paint(&bg, window, &look, pal.canvas, pal.accent);
         let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-        if !maximized {
+        if !maximized && !NATIVE_FRAME {
             resize_edges(&ctx, window);
         }
 
@@ -78,7 +80,7 @@ impl eframe::App for VegitApp {
             crate::ui_quick::drop_menu(&ctx, &menu, local, &pal, &mut acts);
             self.actions.extend(acts);
         }
-        if !maximized {
+        if !maximized && !NATIVE_FRAME {
             // Without the system frame, a thin theme-coloured outline marks the window edge.
             ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("window_outline")))
                 .rect_stroke(window, CornerRadius::ZERO, Stroke::new(1.0, pal.border), egui::StrokeKind::Inside);
@@ -134,12 +136,19 @@ impl VegitApp {
         }
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            let (r, _) = ui.allocate_exact_size(vec2(28.0, TAB_H), Sense::hover());
-            icons::paint_logo(ui.painter(), Rect::from_center_size(r.center() - vec2(0.0, 2.0), vec2(24.0, 24.0)));
-            ui.add_space(6.0);
-            let (lr, _) = ui.allocate_exact_size(vec2(44.0, TAB_H), Sense::hover());
-            ui.painter().text(lr.left_center() - vec2(0.0, 2.0), egui::Align2::LEFT_CENTER, "Vegit", egui::FontId::proportional(13.5), pal.text);
-            ui.add_space(14.0);
+            if NATIVE_FRAME {
+                // Room for the traffic lights, like other macOS apps with tabs in the title bar.
+                // In full screen they are hidden, so the tabs start at the edge.
+                let fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
+                ui.add_space(if fullscreen { 4.0 } else { 70.0 });
+            } else {
+                let (r, _) = ui.allocate_exact_size(vec2(28.0, TAB_H), Sense::hover());
+                icons::paint_logo(ui.painter(), Rect::from_center_size(r.center() - vec2(0.0, 2.0), vec2(24.0, 24.0)));
+                ui.add_space(6.0);
+                let (lr, _) = ui.allocate_exact_size(vec2(44.0, TAB_H), Sense::hover());
+                ui.painter().text(lr.left_center() - vec2(0.0, 2.0), egui::Align2::LEFT_CENTER, "Vegit", egui::FontId::proportional(13.5), pal.text);
+                ui.add_space(14.0);
+            }
 
             // Tabs: the active one is a raised piece of the header tile below it (rounded top,
             // flared bottom corners); the others are plain labels split by thin bars.
@@ -210,8 +219,10 @@ impl VegitApp {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                window_buttons(ui, pal);
-                ui.add_space(6.0);
+                if !NATIVE_FRAME {
+                    window_buttons(ui, pal);
+                    ui.add_space(6.0);
+                }
                 let access_btn = egui::Button::image_and_text(icons::image(ui.ctx(), Icon::Key, 16.0, pal.text), "Access").corner_radius(CornerRadius::same(8));
                 if ui.add(access_btn).on_hover_text("Sign in to reach private repositories").clicked() {
                     self.actions.push(Action::Dialog(Dialog::Access(AccessForm { host: "github.com".into(), ..Default::default() })));

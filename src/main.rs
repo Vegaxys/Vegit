@@ -48,6 +48,8 @@ fn main() -> eframe::Result<()> {
     if let Some(code) = rewrite::sequence_editor_main(&raw) {
         std::process::exit(code);
     }
+    #[cfg(target_os = "macos")]
+    add_homebrew_to_path();
     let mut screenshot: Option<PathBuf> = None;
     let mut open: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
@@ -61,14 +63,20 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("Vegit")
+        .with_inner_size([1440.0, 880.0])
+        .with_min_inner_size([900.0, 560.0])
+        .with_icon(icons::app_icon(256));
+    // macOS keeps its own window (rounded corners, shadow, traffic lights, native resizing)
+    // with a transparent title bar, so the tab strip is drawn under the traffic lights.
+    #[cfg(target_os = "macos")]
+    let viewport = viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false);
+    // Elsewhere the theme draws the whole window, title bar included.
+    #[cfg(not(target_os = "macos"))]
+    let viewport = viewport.with_decorations(false);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Vegit")
-            .with_inner_size([1440.0, 880.0])
-            .with_min_inner_size([900.0, 560.0])
-            .with_icon(icons::app_icon(256))
-            // The theme draws the whole window, title bar included.
-            .with_decorations(false),
+        viewport,
         persist_window: screenshot.is_none(),
         ..Default::default()
     };
@@ -86,4 +94,25 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(app))
         }),
     )
+}
+
+/// An app opened from the Dock or the Finder only gets `/usr/bin:/bin:/usr/sbin:/sbin`, so
+/// git could not find tools installed with Homebrew (git-lfs above all). Put the Homebrew
+/// folders first, as `brew shellenv` does in a terminal, so Vegit sees what the terminal sees.
+#[cfg(target_os = "macos")]
+fn add_homebrew_to_path() {
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"]
+        .iter()
+        .map(PathBuf::from)
+        .filter(|d| d.is_dir() && !std::env::split_paths(&current).any(|p| &p == d))
+        .collect();
+    if dirs.is_empty() {
+        return;
+    }
+    dirs.extend(std::env::split_paths(&current));
+    if let Ok(path) = std::env::join_paths(dirs) {
+        // SAFETY: called at the very start of main, before any other thread exists.
+        unsafe { std::env::set_var("PATH", path) };
+    }
 }
