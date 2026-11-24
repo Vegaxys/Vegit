@@ -748,6 +748,10 @@ pub fn load_status(dir: &Path) -> GitResult<WorkStatus> {
             status.unstaged.push(FileChange { path, old_path: None, state: FileState::from_code(y) });
         }
     }
+    // Git prints untracked files after the tracked ones; merge them so new and modified
+    // files read as one A-Z list. The tree view relies on this path order too.
+    status.unstaged.sort_by(|a, b| a.path.cmp(&b.path));
+    status.staged.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(status)
 }
 

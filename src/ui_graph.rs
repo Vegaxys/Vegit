@@ -619,10 +619,6 @@ fn paint_row_bg(p: &egui::Painter, rect: Rect, pal: &Palette, selected: bool, ho
     if fill != Color32::TRANSPARENT {
         p.rect_filled(rect.shrink2(vec2(0.0, 1.0)), CornerRadius::same(7), fill);
     }
-    if selected {
-        let bar = Rect::from_min_size(rect.left_top() + vec2(0.0, 5.0), vec2(3.0, rect.height() - 10.0));
-        p.rect_filled(bar, CornerRadius::same(2), pal.accent);
-    }
 }
 
 fn curve(p: &egui::Painter, a: Pos2, b: Pos2, stroke: Stroke) {
@@ -848,7 +844,7 @@ pub fn commit_menu(resp: &egui::Response, tab: &RepoTab, sha: &str, on_ref: Opti
 fn deepen(c: Color32) -> Color32 {
     let mut h = egui::ecolor::Hsva::from(c);
     h.s = (h.s * 1.2 + 0.12).min(1.0);
-    h.v = (h.v * 0.8).min(0.66);
+    h.v = (h.v * 0.58).min(0.46);
     h.into()
 }
 

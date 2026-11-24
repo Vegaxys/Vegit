@@ -362,6 +362,8 @@ fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool,
                         acts.push(Action::ToggleFolder(list, path.to_string()));
                     }
                     let p = path.to_string();
+                    let in_folder = |f: &&FileChange| f.path.starts_with(&prefix);
+                    let folder_files: Vec<FileChange> = if side == Side::Unstaged { files.iter().filter(in_folder).cloned().collect() } else { Vec::new() };
                     resp.context_menu(|ui| {
                         crate::util::menu_pad(ui);
                         if ui.button(if side == Side::Staged { "Unstage folder" } else { "Stage folder" }).clicked() {
@@ -371,6 +373,14 @@ fn file_section(ui: &mut egui::Ui, tab: &mut RepoTab, pal: &Palette, tree: bool,
                         if ui.button("Show in folder").clicked() {
                             acts.push(Action::OpenInExplorer(Some(p.clone())));
                             ui.close();
+                        }
+                        if !folder_files.is_empty() {
+                            ui.separator();
+                            let text = RichText::new(format!("Discard folder changes ({} files)", folder_files.len())).color(pal.removed);
+                            if ui.button(text).on_hover_text("The files are saved first: Undo brings them back.").clicked() {
+                                acts.push(Action::DiscardMany(folder_files.clone()));
+                                ui.close();
+                            }
                         }
                     });
                 }
