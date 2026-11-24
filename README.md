@@ -169,6 +169,12 @@ Open a repository directly:
 cargo run --release -- path/to/repository
 ```
 
+On macOS, build a `Vegit.app` (icon, Dock, Launchpad) and copy it to `/Applications`:
+
+```bash
+sh installer/build-macos.sh --install
+```
+
 Save a screenshot of the sample project and exit (handy for checking the UI in CI):
 
 ```bash

@@ -61,14 +61,20 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("Vegit")
+        .with_inner_size([1440.0, 880.0])
+        .with_min_inner_size([900.0, 560.0])
+        .with_icon(icons::app_icon(256));
+    // macOS keeps its own window (rounded corners, shadow, traffic lights, native resizing)
+    // with a transparent title bar, so the tab strip is drawn under the traffic lights.
+    #[cfg(target_os = "macos")]
+    let viewport = viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false);
+    // Elsewhere the theme draws the whole window, title bar included.
+    #[cfg(not(target_os = "macos"))]
+    let viewport = viewport.with_decorations(false);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Vegit")
-            .with_inner_size([1440.0, 880.0])
-            .with_min_inner_size([900.0, 560.0])
-            .with_icon(icons::app_icon(256))
-            // The theme draws the whole window, title bar included.
-            .with_decorations(false),
+        viewport,
         persist_window: screenshot.is_none(),
         ..Default::default()
     };
